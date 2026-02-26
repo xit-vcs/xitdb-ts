@@ -1212,6 +1212,60 @@ export class Database {
     }
   }
 
+  async compact(targetCore: Core): Promise<Database> {
+    const offsetMap = new Map<number, number>();
+    const hasher = new Hasher(this.hasher.algorithm, this.header.hashId);
+    const target = await Database.create(targetCore, hasher);
+
+    if (this.header.tag === Tag.NONE) return target;
+    if (this.header.tag !== Tag.ARRAY_LIST) throw new UnexpectedTagException();
+
+    // read source's top-level ArrayListHeader
+    await this.core.seek(Header.LENGTH);
+    const sourceReader = this.core.reader();
+    const headerBytes = new Uint8Array(ArrayListHeader.LENGTH);
+    await sourceReader.readFully(headerBytes);
+    const sourceHeader = ArrayListHeader.fromBytes(headerBytes);
+
+    if (sourceHeader.size === 0) return target;
+
+    // read the last moment's slot
+    const lastKey = sourceHeader.size - 1;
+    const shift = lastKey < SLOT_COUNT ? 0 : Math.floor(Math.log(lastKey) / Math.log(SLOT_COUNT));
+    const lastSlotPtr = await this.readArrayListSlot(sourceHeader.ptr, lastKey, shift, WriteMode.READ_ONLY, true);
+    const momentSlot = lastSlotPtr.slot;
+
+    // write TopLevelArrayListHeader + root index block to target
+    const targetWriter = targetCore.writer();
+    await targetCore.seek(Header.LENGTH);
+    const targetArrayListPtr = Header.LENGTH + TopLevelArrayListHeader.LENGTH;
+    await targetWriter.write(
+      new TopLevelArrayListHeader(0, new ArrayListHeader(targetArrayListPtr, 1)).toBytes()
+    );
+    await targetWriter.write(new Uint8Array(INDEX_BLOCK_SIZE));
+
+    // recursively remap the moment slot
+    const remappedMoment = await remapSlot(this.core, targetCore, this.header.hashSize, offsetMap, momentSlot);
+
+    // write remapped moment slot into position 0 of target's root index block
+    await targetCore.seek(targetArrayListPtr);
+    await targetWriter.write(remappedMoment.toBytes());
+
+    // update target's DatabaseHeader tag
+    target.header = target.header.withTag(Tag.ARRAY_LIST);
+    await targetCore.seek(0);
+    await target.header.write(targetCore);
+
+    // flush, update file_size, flush again
+    await targetCore.flush();
+    const fileSize = await targetCore.length();
+    await targetCore.seek(Header.LENGTH + ArrayListHeader.LENGTH);
+    await targetWriter.writeLong(fileSize);
+    await targetCore.flush();
+
+    return target;
+  }
+
   async truncate(): Promise<void> {
     if (this.header.tag !== Tag.ARRAY_LIST) return;
 
@@ -2217,4 +2271,309 @@ export class Database {
 
     return new LinkedArrayListHeader(nextShift, rootPtr, headerA.size + headerB.size);
   }
+}
+
+// compaction helpers
+
+async function remapSlot(
+  sourceCore: Core,
+  targetCore: Core,
+  hashSize: number,
+  offsetMap: Map<number, number>,
+  slot: Slot
+): Promise<Slot> {
+  switch (slot.tag) {
+    case Tag.NONE:
+    case Tag.UINT:
+    case Tag.INT:
+    case Tag.FLOAT:
+    case Tag.SHORT_BYTES:
+      return slot;
+    case Tag.BYTES: {
+      const mapped = offsetMap.get(Number(slot.value));
+      if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
+      const newOffset = await remapBytes(sourceCore, targetCore, slot);
+      offsetMap.set(Number(slot.value), newOffset);
+      return new Slot(newOffset, slot.tag, slot.full);
+    }
+    case Tag.INDEX: {
+      const mapped = offsetMap.get(Number(slot.value));
+      if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
+      const newOffset = await remapIndex(sourceCore, targetCore, hashSize, offsetMap, slot);
+      offsetMap.set(Number(slot.value), newOffset);
+      return new Slot(newOffset, slot.tag, slot.full);
+    }
+    case Tag.ARRAY_LIST: {
+      const mapped = offsetMap.get(Number(slot.value));
+      if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
+      const newOffset = await remapArrayList(sourceCore, targetCore, hashSize, offsetMap, slot);
+      offsetMap.set(Number(slot.value), newOffset);
+      return new Slot(newOffset, slot.tag, slot.full);
+    }
+    case Tag.LINKED_ARRAY_LIST: {
+      const mapped = offsetMap.get(Number(slot.value));
+      if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
+      const newOffset = await remapLinkedArrayList(sourceCore, targetCore, hashSize, offsetMap, slot);
+      offsetMap.set(Number(slot.value), newOffset);
+      return new Slot(newOffset, slot.tag, slot.full);
+    }
+    case Tag.HASH_MAP:
+    case Tag.HASH_SET: {
+      const mapped = offsetMap.get(Number(slot.value));
+      if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
+      const newOffset = await remapHashMapOrSet(sourceCore, targetCore, hashSize, offsetMap, slot, false);
+      offsetMap.set(Number(slot.value), newOffset);
+      return new Slot(newOffset, slot.tag, slot.full);
+    }
+    case Tag.COUNTED_HASH_MAP:
+    case Tag.COUNTED_HASH_SET: {
+      const mapped = offsetMap.get(Number(slot.value));
+      if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
+      const newOffset = await remapHashMapOrSet(sourceCore, targetCore, hashSize, offsetMap, slot, true);
+      offsetMap.set(Number(slot.value), newOffset);
+      return new Slot(newOffset, slot.tag, slot.full);
+    }
+    case Tag.KV_PAIR: {
+      const mapped = offsetMap.get(Number(slot.value));
+      if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
+      const newOffset = await remapKvPair(sourceCore, targetCore, hashSize, offsetMap, slot);
+      offsetMap.set(Number(slot.value), newOffset);
+      return new Slot(newOffset, slot.tag, slot.full);
+    }
+    default:
+      throw new UnexpectedTagException();
+  }
+}
+
+async function remapBytes(sourceCore: Core, targetCore: Core, slot: Slot): Promise<number> {
+  await sourceCore.seek(Number(slot.value));
+  const sourceReader = sourceCore.reader();
+  const length = await sourceReader.readLong();
+
+  // total size: 8-byte length + bytes + optional 2-byte format_tag
+  const formatTagSize = slot.full ? 2 : 0;
+  const totalPayload = length + formatTagSize;
+
+  const newOffset = await targetCore.length();
+  await targetCore.seek(newOffset);
+  const targetWriter = targetCore.writer();
+  await targetWriter.writeLong(length);
+
+  // copy bytes in chunks
+  let remaining = totalPayload;
+  while (remaining > 0) {
+    const chunk = Math.min(remaining, 4096);
+    const buf = new Uint8Array(chunk);
+    await sourceReader.readFully(buf);
+    await targetWriter.write(buf);
+    remaining -= chunk;
+  }
+
+  return newOffset;
+}
+
+async function remapIndex(
+  sourceCore: Core,
+  targetCore: Core,
+  hashSize: number,
+  offsetMap: Map<number, number>,
+  slot: Slot
+): Promise<number> {
+  // read 144-byte block (16 slots)
+  await sourceCore.seek(Number(slot.value));
+  const sourceReader = sourceCore.reader();
+  const blockBytes = new Uint8Array(INDEX_BLOCK_SIZE);
+  await sourceReader.readFully(blockBytes);
+
+  // remap each slot
+  const remappedSlots: Slot[] = [];
+  for (let i = 0; i < SLOT_COUNT; i++) {
+    const slotBytes = blockBytes.slice(i * Slot.LENGTH, (i + 1) * Slot.LENGTH);
+    const childSlot = Slot.fromBytes(slotBytes);
+    remappedSlots.push(await remapSlot(sourceCore, targetCore, hashSize, offsetMap, childSlot));
+  }
+
+  // write remapped block to target
+  const newOffset = await targetCore.length();
+  await targetCore.seek(newOffset);
+  const targetWriter = targetCore.writer();
+  for (const s of remappedSlots) {
+    await targetWriter.write(s.toBytes());
+  }
+
+  return newOffset;
+}
+
+async function remapArrayList(
+  sourceCore: Core,
+  targetCore: Core,
+  hashSize: number,
+  offsetMap: Map<number, number>,
+  slot: Slot
+): Promise<number> {
+  // read ArrayListHeader (16 bytes)
+  await sourceCore.seek(Number(slot.value));
+  const sourceReader = sourceCore.reader();
+  const headerBytes = new Uint8Array(ArrayListHeader.LENGTH);
+  await sourceReader.readFully(headerBytes);
+  const header = ArrayListHeader.fromBytes(headerBytes);
+
+  // remap root index block pointer via remapSlot as an .index slot
+  const indexSlot = new Slot(header.ptr, Tag.INDEX);
+  const remappedIndex = await remapSlot(sourceCore, targetCore, hashSize, offsetMap, indexSlot);
+
+  // write new ArrayListHeader with remapped ptr
+  const newOffset = await targetCore.length();
+  await targetCore.seek(newOffset);
+  const targetWriter = targetCore.writer();
+  await targetWriter.write(new ArrayListHeader(Number(remappedIndex.value), header.size).toBytes());
+
+  return newOffset;
+}
+
+async function remapLinkedArrayList(
+  sourceCore: Core,
+  targetCore: Core,
+  hashSize: number,
+  offsetMap: Map<number, number>,
+  slot: Slot
+): Promise<number> {
+  // read LinkedArrayListHeader (17 bytes)
+  await sourceCore.seek(Number(slot.value));
+  const sourceReader = sourceCore.reader();
+  const headerBytes = new Uint8Array(LinkedArrayListHeader.LENGTH);
+  await sourceReader.readFully(headerBytes);
+  const header = LinkedArrayListHeader.fromBytes(headerBytes);
+
+  // remap root block
+  const remappedPtr = await remapLinkedArrayListBlock(sourceCore, targetCore, hashSize, offsetMap, header.ptr);
+
+  // write new header
+  const newOffset = await targetCore.length();
+  await targetCore.seek(newOffset);
+  const targetWriter = targetCore.writer();
+  await targetWriter.write(new LinkedArrayListHeader(header.shift, remappedPtr, header.size).toBytes());
+
+  return newOffset;
+}
+
+async function remapLinkedArrayListBlock(
+  sourceCore: Core,
+  targetCore: Core,
+  hashSize: number,
+  offsetMap: Map<number, number>,
+  blockOffset: number
+): Promise<number> {
+  // dedup check
+  const mapped = offsetMap.get(blockOffset);
+  if (mapped !== undefined) return mapped;
+
+  // read 272-byte block (16 x LinkedArrayListSlot of 17 bytes)
+  await sourceCore.seek(blockOffset);
+  const sourceReader = sourceCore.reader();
+  const blockBytes = new Uint8Array(LINKED_ARRAY_LIST_INDEX_BLOCK_SIZE);
+  await sourceReader.readFully(blockBytes);
+
+  // parse slots
+  const slots: LinkedArrayListSlot[] = [];
+  for (let i = 0; i < SLOT_COUNT; i++) {
+    const slotBytes = blockBytes.slice(i * LinkedArrayListSlot.LENGTH, (i + 1) * LinkedArrayListSlot.LENGTH);
+    slots.push(LinkedArrayListSlot.fromBytes(slotBytes));
+  }
+
+  // remap each slot
+  const remappedSlots: LinkedArrayListSlot[] = [];
+  for (const s of slots) {
+    if (s.slot.tag === Tag.INDEX) {
+      // index slots point to other 272-byte blocks, recurse on ourselves
+      const remappedPtr = await remapLinkedArrayListBlock(sourceCore, targetCore, hashSize, offsetMap, Number(s.slot.value));
+      remappedSlots.push(new LinkedArrayListSlot(s.size, new Slot(remappedPtr, Tag.INDEX, s.slot.full)));
+    } else if (s.slot.empty()) {
+      remappedSlots.push(s);
+    } else {
+      // leaf slot - remap via remapSlot
+      const remapped = await remapSlot(sourceCore, targetCore, hashSize, offsetMap, s.slot);
+      remappedSlots.push(new LinkedArrayListSlot(s.size, remapped));
+    }
+  }
+
+  // write remapped block to target
+  const newOffset = await targetCore.length();
+  await targetCore.seek(newOffset);
+  const targetWriter = targetCore.writer();
+  for (const s of remappedSlots) {
+    await targetWriter.write(s.toBytes());
+  }
+
+  offsetMap.set(blockOffset, newOffset);
+  return newOffset;
+}
+
+async function remapHashMapOrSet(
+  sourceCore: Core,
+  targetCore: Core,
+  hashSize: number,
+  offsetMap: Map<number, number>,
+  slot: Slot,
+  counted: boolean
+): Promise<number> {
+  await sourceCore.seek(Number(slot.value));
+  const sourceReader = sourceCore.reader();
+
+  let countValue = -1;
+  if (counted) {
+    countValue = await sourceReader.readLong();
+  }
+
+  // read 144-byte root index block
+  const blockBytes = new Uint8Array(INDEX_BLOCK_SIZE);
+  await sourceReader.readFully(blockBytes);
+
+  // remap each child slot in the block
+  const remappedSlots: Slot[] = [];
+  for (let i = 0; i < SLOT_COUNT; i++) {
+    const slotBytes = blockBytes.slice(i * Slot.LENGTH, (i + 1) * Slot.LENGTH);
+    const childSlot = Slot.fromBytes(slotBytes);
+    remappedSlots.push(await remapSlot(sourceCore, targetCore, hashSize, offsetMap, childSlot));
+  }
+
+  // write [optional count][remapped block] contiguously to target
+  const newOffset = await targetCore.length();
+  await targetCore.seek(newOffset);
+  const targetWriter = targetCore.writer();
+  if (counted) {
+    await targetWriter.writeLong(countValue);
+  }
+  for (const s of remappedSlots) {
+    await targetWriter.write(s.toBytes());
+  }
+
+  return newOffset;
+}
+
+async function remapKvPair(
+  sourceCore: Core,
+  targetCore: Core,
+  hashSize: number,
+  offsetMap: Map<number, number>,
+  slot: Slot
+): Promise<number> {
+  // read KeyValuePair
+  await sourceCore.seek(Number(slot.value));
+  const sourceReader = sourceCore.reader();
+  const kvPairBytes = new Uint8Array(KeyValuePair.length(hashSize));
+  await sourceReader.readFully(kvPairBytes);
+  const kvPair = KeyValuePair.fromBytes(kvPairBytes, hashSize);
+
+  // remap key_slot and value_slot
+  const remappedKey = await remapSlot(sourceCore, targetCore, hashSize, offsetMap, kvPair.keySlot);
+  const remappedValue = await remapSlot(sourceCore, targetCore, hashSize, offsetMap, kvPair.valueSlot);
+
+  // write remapped KV pair (hash stays unchanged)
+  const newOffset = await targetCore.length();
+  await targetCore.seek(newOffset);
+  const targetWriter = targetCore.writer();
+  await targetWriter.write(new KeyValuePair(remappedValue, remappedKey, kvPair.hash).toBytes());
+
+  return newOffset;
 }
