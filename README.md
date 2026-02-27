@@ -424,9 +424,7 @@ switch (hashIdStr) {
 Normally, an immutable database grows forever, because old data is never deleted. To reclaim disk space and clear the history, xitdb supports compaction. This involves completely rebuilding the database file to only contain the data accessible from the latest copy (i.e., "moment") of the database.
 
 ```typescript
-// create the file and core for the new database
 using compactCore = await CoreBufferedFile.create('compact.db');
-
 const compactDb = await db.compact(compactCore);
 
 // read from the new compacted db
