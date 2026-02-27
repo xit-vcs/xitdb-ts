@@ -854,6 +854,19 @@ describe('Compaction', () => {
       await rm(tmpDir, { recursive: true });
     }
   });
+
+  test('buffered file to in-memory storage', async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), 'xitdb-compact-'));
+    const sourcePath = join(tmpDir, 'source.db');
+    try {
+      using sourceCore = await CoreBufferedFile.create(sourcePath);
+      const targetCore = new CoreMemory();
+      const hasher = new Hasher('SHA-1');
+      await testCompaction(sourceCore, targetCore, hasher, sourcePath, null);
+    } finally {
+      await rm(tmpDir, { recursive: true });
+    }
+  });
 });
 
 async function testCompaction(
