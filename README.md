@@ -431,3 +431,5 @@ const compactDb = await db.compact(compactCore);
 const history = new ReadArrayList(compactDb.rootCursor());
 expect(await history.count()).toBe(1);
 ```
+
+This compacted database will be in a separate file. If you want to delete the original database and replace it with this one, you'll need to do that yourself. It is not possible to compact a database in-place (using the same file as the target database); doing so would fail and would render your original database unreadable.
