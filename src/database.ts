@@ -65,21 +65,21 @@ export class Header {
     return arr;
   }
 
-  static async read(core: Core): Promise<Header> {
+  static read(core: Core): Header {
     const reader = core.reader();
     const magicNumber = new Uint8Array(3);
-    await reader.readFully(magicNumber);
-    const tagByte = await reader.readByte();
+    reader.readFully(magicNumber);
+    const tagByte = reader.readByte();
     const tag = tagValueOf(tagByte & 0b0111_1111);
-    const version = await reader.readShort();
-    const hashSize = await reader.readShort();
-    const hashId = await reader.readInt();
+    const version = reader.readShort();
+    const hashSize = reader.readShort();
+    const hashId = reader.readInt();
     return new Header(hashId, hashSize, version, tag, magicNumber);
   }
 
-  async write(core: Core): Promise<void> {
+  write(core: Core): void {
     const writer = core.writer();
-    await writer.write(this.toBytes());
+    writer.write(this.toBytes());
   }
 
   validate(): void {
@@ -274,7 +274,7 @@ export interface PathPartBase {
     path: PathPart[],
     pathI: number,
     slotPtr: SlotPointer
-  ): Promise<SlotPointer>;
+  ): SlotPointer;
 }
 
 // HashMapGetTarget types
@@ -296,36 +296,36 @@ export class HashMapGetValue {
 }
 
 // ContextFunction type
-export type ContextFunction = (cursor: any) => Promise<void>;
+export type ContextFunction = (cursor: any) => void;
 
 // PathPart implementations
 export class ArrayListInit implements PathPartBase {
   readonly kind = 'ArrayListInit';
 
-  async readSlotPointer(
+  readSlotPointer(
     db: Database,
     isTopLevel: boolean,
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
     slotPtr: SlotPointer
-  ): Promise<SlotPointer> {
+  ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
 
     if (isTopLevel) {
       const writer = db.core.writer();
 
       if (db.header.tag === Tag.NONE) {
-        await db.core.seek(Header.LENGTH);
+        db.core.seek(Header.LENGTH);
         const arrayListPtr = Header.LENGTH + TopLevelArrayListHeader.LENGTH;
-        await writer.write(
+        writer.write(
           new TopLevelArrayListHeader(0, new ArrayListHeader(arrayListPtr, 0)).toBytes()
         );
-        await writer.write(new Uint8Array(INDEX_BLOCK_SIZE));
+        writer.write(new Uint8Array(INDEX_BLOCK_SIZE));
 
-        await db.core.seek(0);
+        db.core.seek(0);
         db.header = db.header.withTag(Tag.ARRAY_LIST);
-        await writer.write(db.header.toBytes());
+        writer.write(db.header.toBytes());
       }
 
       const nextSlotPtr = slotPtr.withSlot(slotPtr.slot.withTag(Tag.ARRAY_LIST));
@@ -338,15 +338,15 @@ export class ArrayListInit implements PathPartBase {
     switch (slotPtr.slot.tag) {
       case Tag.NONE: {
         const writer = db.core.writer();
-        let arrayListStart = await db.core.length();
-        await db.core.seek(arrayListStart);
+        let arrayListStart = db.core.length();
+        db.core.seek(arrayListStart);
         const arrayListPtr = arrayListStart + ArrayListHeader.LENGTH;
-        await writer.write(new ArrayListHeader(arrayListPtr, 0).toBytes());
-        await writer.write(new Uint8Array(INDEX_BLOCK_SIZE));
+        writer.write(new ArrayListHeader(arrayListPtr, 0).toBytes());
+        writer.write(new Uint8Array(INDEX_BLOCK_SIZE));
 
         const nextSlotPtr = new SlotPointer(position, new Slot(arrayListStart, Tag.ARRAY_LIST));
-        await db.core.seek(position);
-        await writer.write(nextSlotPtr.slot.toBytes());
+        db.core.seek(position);
+        writer.write(nextSlotPtr.slot.toBytes());
         return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr);
       }
       case Tag.ARRAY_LIST: {
@@ -357,28 +357,28 @@ export class ArrayListInit implements PathPartBase {
 
         if (db.txStart !== null) {
           if (arrayListStart < db.txStart) {
-            await db.core.seek(arrayListStart);
+            db.core.seek(arrayListStart);
             const headerBytes = new Uint8Array(ArrayListHeader.LENGTH);
-            await reader.readFully(headerBytes);
+            reader.readFully(headerBytes);
             const header = ArrayListHeader.fromBytes(headerBytes);
-            await db.core.seek(header.ptr);
+            db.core.seek(header.ptr);
             const arrayListIndexBlock = new Uint8Array(INDEX_BLOCK_SIZE);
-            await reader.readFully(arrayListIndexBlock);
+            reader.readFully(arrayListIndexBlock);
 
-            arrayListStart = await db.core.length();
-            await db.core.seek(arrayListStart);
+            arrayListStart = db.core.length();
+            db.core.seek(arrayListStart);
             const nextArrayListPtr = arrayListStart + ArrayListHeader.LENGTH;
             const newHeader = header.withPtr(nextArrayListPtr);
-            await writer.write(newHeader.toBytes());
-            await writer.write(arrayListIndexBlock);
+            writer.write(newHeader.toBytes());
+            writer.write(arrayListIndexBlock);
           }
         } else if (db.header.tag === Tag.ARRAY_LIST) {
           throw new ExpectedTxStartException();
         }
 
         const nextSlotPtr = new SlotPointer(position, new Slot(arrayListStart, Tag.ARRAY_LIST));
-        await db.core.seek(position);
-        await writer.write(nextSlotPtr.slot.toBytes());
+        db.core.seek(position);
+        writer.write(nextSlotPtr.slot.toBytes());
         return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr);
       }
       default:
@@ -391,14 +391,14 @@ export class ArrayListGet implements PathPartBase {
   readonly kind = 'ArrayListGet';
   constructor(public index: number) {}
 
-  async readSlotPointer(
+  readSlotPointer(
     db: Database,
     isTopLevel: boolean,
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
     slotPtr: SlotPointer
-  ): Promise<SlotPointer> {
+  ): SlotPointer {
     const tag = isTopLevel ? db.header.tag : slotPtr.slot.tag;
     switch (tag) {
       case Tag.NONE:
@@ -412,10 +412,10 @@ export class ArrayListGet implements PathPartBase {
     const nextArrayListStart = Number(slotPtr.slot.value);
     let index = this.index;
 
-    await db.core.seek(nextArrayListStart);
+    db.core.seek(nextArrayListStart);
     const reader = db.core.reader();
     const headerBytes = new Uint8Array(ArrayListHeader.LENGTH);
-    await reader.readFully(headerBytes);
+    reader.readFully(headerBytes);
     const header = ArrayListHeader.fromBytes(headerBytes);
     if (index >= header.size || index < -header.size) {
       throw new KeyNotFoundException();
@@ -424,7 +424,7 @@ export class ArrayListGet implements PathPartBase {
     const key = index < 0 ? header.size - Math.abs(index) : index;
     const lastKey = header.size - 1;
     const shift = lastKey < SLOT_COUNT ? 0 : Math.floor(Math.log(lastKey) / Math.log(SLOT_COUNT));
-    const finalSlotPtr = await db.readArrayListSlot(header.ptr, key, shift, writeMode, isTopLevel);
+    const finalSlotPtr = db.readArrayListSlot(header.ptr, key, shift, writeMode, isTopLevel);
 
     return db.readSlotPointer(writeMode, path, pathI + 1, finalSlotPtr);
   }
@@ -433,14 +433,14 @@ export class ArrayListGet implements PathPartBase {
 export class ArrayListAppend implements PathPartBase {
   readonly kind = 'ArrayListAppend';
 
-  async readSlotPointer(
+  readSlotPointer(
     db: Database,
     isTopLevel: boolean,
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
     slotPtr: SlotPointer
-  ): Promise<SlotPointer> {
+  ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
 
     const tag = isTopLevel ? db.header.tag : slotPtr.slot.tag;
@@ -449,24 +449,24 @@ export class ArrayListAppend implements PathPartBase {
     const reader = db.core.reader();
     const nextArrayListStart = Number(slotPtr.slot.value);
 
-    await db.core.seek(nextArrayListStart);
+    db.core.seek(nextArrayListStart);
     const headerBytes = new Uint8Array(ArrayListHeader.LENGTH);
-    await reader.readFully(headerBytes);
+    reader.readFully(headerBytes);
     const origHeader = ArrayListHeader.fromBytes(headerBytes);
 
-    const appendResult = await db.readArrayListSlotAppend(origHeader, writeMode, isTopLevel);
-    const finalSlotPtr = await db.readSlotPointer(writeMode, path, pathI + 1, appendResult.slotPtr);
+    const appendResult = db.readArrayListSlotAppend(origHeader, writeMode, isTopLevel);
+    const finalSlotPtr = db.readSlotPointer(writeMode, path, pathI + 1, appendResult.slotPtr);
 
     const writer = db.core.writer();
     if (isTopLevel) {
-      await db.core.flush();
-      const fileSize = await db.core.length();
+      db.core.flush();
+      const fileSize = db.core.length();
       const header = new TopLevelArrayListHeader(fileSize, appendResult.header);
-      await db.core.seek(nextArrayListStart);
-      await writer.write(header.toBytes());
+      db.core.seek(nextArrayListStart);
+      writer.write(header.toBytes());
     } else {
-      await db.core.seek(nextArrayListStart);
-      await writer.write(appendResult.header.toBytes());
+      db.core.seek(nextArrayListStart);
+      writer.write(appendResult.header.toBytes());
     }
 
     return finalSlotPtr;
@@ -477,31 +477,31 @@ export class ArrayListSlice implements PathPartBase {
   readonly kind = 'ArrayListSlice';
   constructor(public size: number) {}
 
-  async readSlotPointer(
+  readSlotPointer(
     db: Database,
     isTopLevel: boolean,
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
     slotPtr: SlotPointer
-  ): Promise<SlotPointer> {
+  ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
     if (slotPtr.slot.tag !== Tag.ARRAY_LIST) throw new UnexpectedTagException();
 
     const reader = db.core.reader();
     const nextArrayListStart = Number(slotPtr.slot.value);
 
-    await db.core.seek(nextArrayListStart);
+    db.core.seek(nextArrayListStart);
     const headerBytes = new Uint8Array(ArrayListHeader.LENGTH);
-    await reader.readFully(headerBytes);
+    reader.readFully(headerBytes);
     const origHeader = ArrayListHeader.fromBytes(headerBytes);
 
-    const sliceHeader = await db.readArrayListSlice(origHeader, this.size);
-    const finalSlotPtr = await db.readSlotPointer(writeMode, path, pathI + 1, slotPtr);
+    const sliceHeader = db.readArrayListSlice(origHeader, this.size);
+    const finalSlotPtr = db.readSlotPointer(writeMode, path, pathI + 1, slotPtr);
 
     const writer = db.core.writer();
-    await db.core.seek(nextArrayListStart);
-    await writer.write(sliceHeader.toBytes());
+    db.core.seek(nextArrayListStart);
+    writer.write(sliceHeader.toBytes());
 
     return finalSlotPtr;
   }
@@ -510,14 +510,14 @@ export class ArrayListSlice implements PathPartBase {
 export class LinkedArrayListInit implements PathPartBase {
   readonly kind = 'LinkedArrayListInit';
 
-  async readSlotPointer(
+  readSlotPointer(
     db: Database,
     isTopLevel: boolean,
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
     slotPtr: SlotPointer
-  ): Promise<SlotPointer> {
+  ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
     if (isTopLevel) throw new InvalidTopLevelTypeException();
     if (slotPtr.position === null) throw new CursorNotWriteableException();
@@ -526,15 +526,15 @@ export class LinkedArrayListInit implements PathPartBase {
     switch (slotPtr.slot.tag) {
       case Tag.NONE: {
         const writer = db.core.writer();
-        const arrayListStart = await db.core.length();
-        await db.core.seek(arrayListStart);
+        const arrayListStart = db.core.length();
+        db.core.seek(arrayListStart);
         const arrayListPtr = arrayListStart + LinkedArrayListHeader.LENGTH;
-        await writer.write(new LinkedArrayListHeader(0, arrayListPtr, 0).toBytes());
-        await writer.write(new Uint8Array(LINKED_ARRAY_LIST_INDEX_BLOCK_SIZE));
+        writer.write(new LinkedArrayListHeader(0, arrayListPtr, 0).toBytes());
+        writer.write(new Uint8Array(LINKED_ARRAY_LIST_INDEX_BLOCK_SIZE));
 
         const nextSlotPtr = new SlotPointer(position, new Slot(arrayListStart, Tag.LINKED_ARRAY_LIST));
-        await db.core.seek(position);
-        await writer.write(nextSlotPtr.slot.toBytes());
+        db.core.seek(position);
+        writer.write(nextSlotPtr.slot.toBytes());
         return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr);
       }
       case Tag.LINKED_ARRAY_LIST: {
@@ -545,28 +545,28 @@ export class LinkedArrayListInit implements PathPartBase {
 
         if (db.txStart !== null) {
           if (arrayListStart < db.txStart) {
-            await db.core.seek(arrayListStart);
+            db.core.seek(arrayListStart);
             const headerBytes = new Uint8Array(LinkedArrayListHeader.LENGTH);
-            await reader.readFully(headerBytes);
+            reader.readFully(headerBytes);
             const header = LinkedArrayListHeader.fromBytes(headerBytes);
-            await db.core.seek(header.ptr);
+            db.core.seek(header.ptr);
             const arrayListIndexBlock = new Uint8Array(LINKED_ARRAY_LIST_INDEX_BLOCK_SIZE);
-            await reader.readFully(arrayListIndexBlock);
+            reader.readFully(arrayListIndexBlock);
 
-            arrayListStart = await db.core.length();
-            await db.core.seek(arrayListStart);
+            arrayListStart = db.core.length();
+            db.core.seek(arrayListStart);
             const nextArrayListPtr = arrayListStart + LinkedArrayListHeader.LENGTH;
             const newHeader = header.withPtr(nextArrayListPtr);
-            await writer.write(newHeader.toBytes());
-            await writer.write(arrayListIndexBlock);
+            writer.write(newHeader.toBytes());
+            writer.write(arrayListIndexBlock);
           }
         } else if (db.header.tag === Tag.ARRAY_LIST) {
           throw new ExpectedTxStartException();
         }
 
         const nextSlotPtr = new SlotPointer(position, new Slot(arrayListStart, Tag.LINKED_ARRAY_LIST));
-        await db.core.seek(position);
-        await writer.write(nextSlotPtr.slot.toBytes());
+        db.core.seek(position);
+        writer.write(nextSlotPtr.slot.toBytes());
         return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr);
       }
       default:
@@ -579,14 +579,14 @@ export class LinkedArrayListGet implements PathPartBase {
   readonly kind = 'LinkedArrayListGet';
   constructor(public index: number) {}
 
-  async readSlotPointer(
+  readSlotPointer(
     db: Database,
     isTopLevel: boolean,
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
     slotPtr: SlotPointer
-  ): Promise<SlotPointer> {
+  ): SlotPointer {
     switch (slotPtr.slot.tag) {
       case Tag.NONE:
         throw new KeyNotFoundException();
@@ -598,17 +598,17 @@ export class LinkedArrayListGet implements PathPartBase {
 
     let index = this.index;
 
-    await db.core.seek(Number(slotPtr.slot.value));
+    db.core.seek(Number(slotPtr.slot.value));
     const reader = db.core.reader();
     const headerBytes = new Uint8Array(LinkedArrayListHeader.LENGTH);
-    await reader.readFully(headerBytes);
+    reader.readFully(headerBytes);
     const header = LinkedArrayListHeader.fromBytes(headerBytes);
     if (index >= header.size || index < -header.size) {
       throw new KeyNotFoundException();
     }
 
     const key = index < 0 ? header.size - Math.abs(index) : index;
-    const finalSlotPtr = await db.readLinkedArrayListSlot(header.ptr, key, header.shift, writeMode, isTopLevel);
+    const finalSlotPtr = db.readLinkedArrayListSlot(header.ptr, key, header.shift, writeMode, isTopLevel);
 
     return db.readSlotPointer(writeMode, path, pathI + 1, finalSlotPtr.slotPtr);
   }
@@ -617,31 +617,31 @@ export class LinkedArrayListGet implements PathPartBase {
 export class LinkedArrayListAppend implements PathPartBase {
   readonly kind = 'LinkedArrayListAppend';
 
-  async readSlotPointer(
+  readSlotPointer(
     db: Database,
     isTopLevel: boolean,
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
     slotPtr: SlotPointer
-  ): Promise<SlotPointer> {
+  ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
     if (slotPtr.slot.tag !== Tag.LINKED_ARRAY_LIST) throw new UnexpectedTagException();
 
     const reader = db.core.reader();
     const nextArrayListStart = Number(slotPtr.slot.value);
 
-    await db.core.seek(nextArrayListStart);
+    db.core.seek(nextArrayListStart);
     const headerBytes = new Uint8Array(LinkedArrayListHeader.LENGTH);
-    await reader.readFully(headerBytes);
+    reader.readFully(headerBytes);
     const origHeader = LinkedArrayListHeader.fromBytes(headerBytes);
 
-    const appendResult = await db.readLinkedArrayListSlotAppend(origHeader, writeMode, isTopLevel);
-    const finalSlotPtr = await db.readSlotPointer(writeMode, path, pathI + 1, appendResult.slotPtr.slotPtr);
+    const appendResult = db.readLinkedArrayListSlotAppend(origHeader, writeMode, isTopLevel);
+    const finalSlotPtr = db.readSlotPointer(writeMode, path, pathI + 1, appendResult.slotPtr.slotPtr);
 
     const writer = db.core.writer();
-    await db.core.seek(nextArrayListStart);
-    await writer.write(appendResult.header.toBytes());
+    db.core.seek(nextArrayListStart);
+    writer.write(appendResult.header.toBytes());
 
     return finalSlotPtr;
   }
@@ -651,31 +651,31 @@ export class LinkedArrayListSlice implements PathPartBase {
   readonly kind = 'LinkedArrayListSlice';
   constructor(public offset: number, public size: number) {}
 
-  async readSlotPointer(
+  readSlotPointer(
     db: Database,
     isTopLevel: boolean,
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
     slotPtr: SlotPointer
-  ): Promise<SlotPointer> {
+  ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
     if (slotPtr.slot.tag !== Tag.LINKED_ARRAY_LIST) throw new UnexpectedTagException();
 
     const reader = db.core.reader();
     const nextArrayListStart = Number(slotPtr.slot.value);
 
-    await db.core.seek(nextArrayListStart);
+    db.core.seek(nextArrayListStart);
     const headerBytes = new Uint8Array(LinkedArrayListHeader.LENGTH);
-    await reader.readFully(headerBytes);
+    reader.readFully(headerBytes);
     const origHeader = LinkedArrayListHeader.fromBytes(headerBytes);
 
-    const sliceHeader = await db.readLinkedArrayListSlice(origHeader, this.offset, this.size);
-    const finalSlotPtr = await db.readSlotPointer(writeMode, path, pathI + 1, slotPtr);
+    const sliceHeader = db.readLinkedArrayListSlice(origHeader, this.offset, this.size);
+    const finalSlotPtr = db.readSlotPointer(writeMode, path, pathI + 1, slotPtr);
 
     const writer = db.core.writer();
-    await db.core.seek(nextArrayListStart);
-    await writer.write(sliceHeader.toBytes());
+    db.core.seek(nextArrayListStart);
+    writer.write(sliceHeader.toBytes());
 
     return finalSlotPtr;
   }
@@ -685,14 +685,14 @@ export class LinkedArrayListConcat implements PathPartBase {
   readonly kind = 'LinkedArrayListConcat';
   constructor(public list: Slot) {}
 
-  async readSlotPointer(
+  readSlotPointer(
     db: Database,
     isTopLevel: boolean,
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
     slotPtr: SlotPointer
-  ): Promise<SlotPointer> {
+  ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
     if (slotPtr.slot.tag !== Tag.LINKED_ARRAY_LIST) throw new UnexpectedTagException();
     if (this.list.tag !== Tag.LINKED_ARRAY_LIST) throw new UnexpectedTagException();
@@ -700,21 +700,21 @@ export class LinkedArrayListConcat implements PathPartBase {
     const reader = db.core.reader();
     const nextArrayListStart = Number(slotPtr.slot.value);
 
-    await db.core.seek(nextArrayListStart);
+    db.core.seek(nextArrayListStart);
     const headerBytesA = new Uint8Array(LinkedArrayListHeader.LENGTH);
-    await reader.readFully(headerBytesA);
+    reader.readFully(headerBytesA);
     const headerA = LinkedArrayListHeader.fromBytes(headerBytesA);
-    await db.core.seek(Number(this.list.value));
+    db.core.seek(Number(this.list.value));
     const headerBytesB = new Uint8Array(LinkedArrayListHeader.LENGTH);
-    await reader.readFully(headerBytesB);
+    reader.readFully(headerBytesB);
     const headerB = LinkedArrayListHeader.fromBytes(headerBytesB);
 
-    const concatHeader = await db.readLinkedArrayListConcat(headerA, headerB);
-    const finalSlotPtr = await db.readSlotPointer(writeMode, path, pathI + 1, slotPtr);
+    const concatHeader = db.readLinkedArrayListConcat(headerA, headerB);
+    const finalSlotPtr = db.readSlotPointer(writeMode, path, pathI + 1, slotPtr);
 
     const writer = db.core.writer();
-    await db.core.seek(nextArrayListStart);
-    await writer.write(concatHeader.toBytes());
+    db.core.seek(nextArrayListStart);
+    writer.write(concatHeader.toBytes());
 
     return finalSlotPtr;
   }
@@ -724,23 +724,23 @@ export class LinkedArrayListInsert implements PathPartBase {
   readonly kind = 'LinkedArrayListInsert';
   constructor(public index: number) {}
 
-  async readSlotPointer(
+  readSlotPointer(
     db: Database,
     isTopLevel: boolean,
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
     slotPtr: SlotPointer
-  ): Promise<SlotPointer> {
+  ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
     if (slotPtr.slot.tag !== Tag.LINKED_ARRAY_LIST) throw new UnexpectedTagException();
 
     const reader = db.core.reader();
     const nextArrayListStart = Number(slotPtr.slot.value);
 
-    await db.core.seek(nextArrayListStart);
+    db.core.seek(nextArrayListStart);
     const headerBytes = new Uint8Array(LinkedArrayListHeader.LENGTH);
-    await reader.readFully(headerBytes);
+    reader.readFully(headerBytes);
     const origHeader = LinkedArrayListHeader.fromBytes(headerBytes);
 
     let index = this.index;
@@ -749,18 +749,18 @@ export class LinkedArrayListInsert implements PathPartBase {
     }
     const key = index < 0 ? origHeader.size - Math.abs(index) : index;
 
-    const headerA = await db.readLinkedArrayListSlice(origHeader, 0, key);
-    const headerB = await db.readLinkedArrayListSlice(origHeader, key, origHeader.size - key);
+    const headerA = db.readLinkedArrayListSlice(origHeader, 0, key);
+    const headerB = db.readLinkedArrayListSlice(origHeader, key, origHeader.size - key);
 
-    const appendResult = await db.readLinkedArrayListSlotAppend(headerA, writeMode, isTopLevel);
-    const concatHeader = await db.readLinkedArrayListConcat(appendResult.header, headerB);
+    const appendResult = db.readLinkedArrayListSlotAppend(headerA, writeMode, isTopLevel);
+    const concatHeader = db.readLinkedArrayListConcat(appendResult.header, headerB);
 
-    const nextSlotPtr = await db.readLinkedArrayListSlot(concatHeader.ptr, key, concatHeader.shift, WriteMode.READ_ONLY, isTopLevel);
-    const finalSlotPtr = await db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr.slotPtr);
+    const nextSlotPtr = db.readLinkedArrayListSlot(concatHeader.ptr, key, concatHeader.shift, WriteMode.READ_ONLY, isTopLevel);
+    const finalSlotPtr = db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr.slotPtr);
 
     const writer = db.core.writer();
-    await db.core.seek(nextArrayListStart);
-    await writer.write(concatHeader.toBytes());
+    db.core.seek(nextArrayListStart);
+    writer.write(concatHeader.toBytes());
 
     return finalSlotPtr;
   }
@@ -770,23 +770,23 @@ export class LinkedArrayListRemove implements PathPartBase {
   readonly kind = 'LinkedArrayListRemove';
   constructor(public index: number) {}
 
-  async readSlotPointer(
+  readSlotPointer(
     db: Database,
     isTopLevel: boolean,
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
     slotPtr: SlotPointer
-  ): Promise<SlotPointer> {
+  ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
     if (slotPtr.slot.tag !== Tag.LINKED_ARRAY_LIST) throw new UnexpectedTagException();
 
     const reader = db.core.reader();
     const nextArrayListStart = Number(slotPtr.slot.value);
 
-    await db.core.seek(nextArrayListStart);
+    db.core.seek(nextArrayListStart);
     const headerBytes = new Uint8Array(LinkedArrayListHeader.LENGTH);
-    await reader.readFully(headerBytes);
+    reader.readFully(headerBytes);
     const origHeader = LinkedArrayListHeader.fromBytes(headerBytes);
 
     let index = this.index;
@@ -795,16 +795,16 @@ export class LinkedArrayListRemove implements PathPartBase {
     }
     const key = index < 0 ? origHeader.size - Math.abs(index) : index;
 
-    const headerA = await db.readLinkedArrayListSlice(origHeader, 0, key);
-    const headerB = await db.readLinkedArrayListSlice(origHeader, key + 1, origHeader.size - (key + 1));
-    const concatHeader = await db.readLinkedArrayListConcat(headerA, headerB);
+    const headerA = db.readLinkedArrayListSlice(origHeader, 0, key);
+    const headerB = db.readLinkedArrayListSlice(origHeader, key + 1, origHeader.size - (key + 1));
+    const concatHeader = db.readLinkedArrayListConcat(headerA, headerB);
 
     const nextSlotPtr = new SlotPointer(concatHeader.ptr, new Slot(nextArrayListStart, Tag.LINKED_ARRAY_LIST));
-    const finalSlotPtr = await db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr);
+    const finalSlotPtr = db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr);
 
     const writer = db.core.writer();
-    await db.core.seek(nextArrayListStart);
-    await writer.write(concatHeader.toBytes());
+    db.core.seek(nextArrayListStart);
+    writer.write(concatHeader.toBytes());
 
     return finalSlotPtr;
   }
@@ -814,14 +814,14 @@ export class HashMapInit implements PathPartBase {
   readonly kind = 'HashMapInit';
   constructor(public counted: boolean = false, public set: boolean = false) {}
 
-  async readSlotPointer(
+  readSlotPointer(
     db: Database,
     isTopLevel: boolean,
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
     slotPtr: SlotPointer
-  ): Promise<SlotPointer> {
+  ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
 
     const tag = this.counted
@@ -832,17 +832,17 @@ export class HashMapInit implements PathPartBase {
       const writer = db.core.writer();
 
       if (db.header.tag === Tag.NONE) {
-        await db.core.seek(Header.LENGTH);
+        db.core.seek(Header.LENGTH);
 
         if (this.counted) {
-          await writer.writeLong(0);
+          writer.writeLong(0);
         }
 
-        await writer.write(new Uint8Array(INDEX_BLOCK_SIZE));
+        writer.write(new Uint8Array(INDEX_BLOCK_SIZE));
 
-        await db.core.seek(0);
+        db.core.seek(0);
         db.header = db.header.withTag(tag);
-        await writer.write(db.header.toBytes());
+        writer.write(db.header.toBytes());
       }
 
       const nextSlotPtr = slotPtr.withSlot(slotPtr.slot.withTag(tag));
@@ -855,16 +855,16 @@ export class HashMapInit implements PathPartBase {
     switch (slotPtr.slot.tag) {
       case Tag.NONE: {
         const writer = db.core.writer();
-        const mapStart = await db.core.length();
-        await db.core.seek(mapStart);
+        const mapStart = db.core.length();
+        db.core.seek(mapStart);
         if (this.counted) {
-          await writer.writeLong(0);
+          writer.writeLong(0);
         }
-        await writer.write(new Uint8Array(INDEX_BLOCK_SIZE));
+        writer.write(new Uint8Array(INDEX_BLOCK_SIZE));
 
         const nextSlotPtr = new SlotPointer(position, new Slot(mapStart, tag));
-        await db.core.seek(position);
-        await writer.write(nextSlotPtr.slot.toBytes());
+        db.core.seek(position);
+        writer.write(nextSlotPtr.slot.toBytes());
         return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr);
       }
       case Tag.HASH_MAP:
@@ -896,28 +896,28 @@ export class HashMapInit implements PathPartBase {
 
         if (db.txStart !== null) {
           if (mapStart < db.txStart) {
-            await db.core.seek(mapStart);
+            db.core.seek(mapStart);
             let mapCountMaybe: number | null = null;
             if (this.counted) {
-              mapCountMaybe = await reader.readLong();
+              mapCountMaybe = reader.readLong();
             }
             const mapIndexBlock = new Uint8Array(INDEX_BLOCK_SIZE);
-            await reader.readFully(mapIndexBlock);
+            reader.readFully(mapIndexBlock);
 
-            mapStart = await db.core.length();
-            await db.core.seek(mapStart);
+            mapStart = db.core.length();
+            db.core.seek(mapStart);
             if (mapCountMaybe !== null) {
-              await writer.writeLong(mapCountMaybe);
+              writer.writeLong(mapCountMaybe);
             }
-            await writer.write(mapIndexBlock);
+            writer.write(mapIndexBlock);
           }
         } else if (db.header.tag === Tag.ARRAY_LIST) {
           throw new ExpectedTxStartException();
         }
 
         const nextSlotPtr = new SlotPointer(position, new Slot(mapStart, tag));
-        await db.core.seek(position);
-        await writer.write(nextSlotPtr.slot.toBytes());
+        db.core.seek(position);
+        writer.write(nextSlotPtr.slot.toBytes());
         return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr);
       }
       default:
@@ -930,14 +930,14 @@ export class HashMapGet implements PathPartBase {
   readonly kind = 'HashMapGet';
   constructor(public target: HashMapGetTarget) {}
 
-  async readSlotPointer(
+  readSlotPointer(
     db: Database,
     isTopLevel: boolean,
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
     slotPtr: SlotPointer
-  ): Promise<SlotPointer> {
+  ): SlotPointer {
     let counted = false;
     switch (slotPtr.slot.tag) {
       case Tag.NONE:
@@ -955,15 +955,15 @@ export class HashMapGet implements PathPartBase {
 
     const indexPos = counted ? Number(slotPtr.slot.value) + 8 : Number(slotPtr.slot.value);
     const hash = db.checkHash(this.target);
-    const res = await db.readMapSlot(indexPos, hash, 0, writeMode, isTopLevel, this.target);
+    const res = db.readMapSlot(indexPos, hash, 0, writeMode, isTopLevel, this.target);
 
     if (writeMode === WriteMode.READ_WRITE && counted && res.isEmpty) {
       const reader = db.core.reader();
       const writer = db.core.writer();
-      await db.core.seek(Number(slotPtr.slot.value));
-      const mapCount = await reader.readLong();
-      await db.core.seek(Number(slotPtr.slot.value));
-      await writer.writeLong(mapCount + 1);
+      db.core.seek(Number(slotPtr.slot.value));
+      const mapCount = reader.readLong();
+      db.core.seek(Number(slotPtr.slot.value));
+      writer.writeLong(mapCount + 1);
     }
 
     return db.readSlotPointer(writeMode, path, pathI + 1, res.slotPtr);
@@ -974,14 +974,14 @@ export class HashMapRemove implements PathPartBase {
   readonly kind = 'HashMapRemove';
   constructor(public hash: Uint8Array) {}
 
-  async readSlotPointer(
+  readSlotPointer(
     db: Database,
     isTopLevel: boolean,
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
     slotPtr: SlotPointer
-  ): Promise<SlotPointer> {
+  ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
 
     let counted = false;
@@ -1004,7 +1004,7 @@ export class HashMapRemove implements PathPartBase {
 
     let keyFound = true;
     try {
-      await db.removeMapSlot(indexPos, hash, 0, isTopLevel);
+      db.removeMapSlot(indexPos, hash, 0, isTopLevel);
     } catch (e) {
       if (e instanceof KeyNotFoundException) {
         keyFound = false;
@@ -1016,10 +1016,10 @@ export class HashMapRemove implements PathPartBase {
     if (writeMode === WriteMode.READ_WRITE && counted && keyFound) {
       const reader = db.core.reader();
       const writer = db.core.writer();
-      await db.core.seek(Number(slotPtr.slot.value));
-      const mapCount = await reader.readLong();
-      await db.core.seek(Number(slotPtr.slot.value));
-      await writer.writeLong(mapCount - 1);
+      db.core.seek(Number(slotPtr.slot.value));
+      const mapCount = reader.readLong();
+      db.core.seek(Number(slotPtr.slot.value));
+      writer.writeLong(mapCount - 1);
     }
 
     if (!keyFound) throw new KeyNotFoundException();
@@ -1032,14 +1032,14 @@ export class WriteData implements PathPartBase {
   readonly kind = 'WriteData';
   constructor(public data: WriteableData | null) {}
 
-  async readSlotPointer(
+  readSlotPointer(
     db: Database,
     isTopLevel: boolean,
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
     slotPtr: SlotPointer
-  ): Promise<SlotPointer> {
+  ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
     if (slotPtr.position === null) throw new CursorNotWriteableException();
     const position = slotPtr.position;
@@ -1076,10 +1076,10 @@ export class WriteData implements PathPartBase {
         slot = new Slot(longValue, Tag.SHORT_BYTES, data.formatTag !== null);
       } else {
         const nextCursor = new WriteCursor(slotPtr, db);
-        const cursorWriter = await nextCursor.writer();
+        const cursorWriter = nextCursor.writer();
         cursorWriter.formatTag = data.formatTag;
-        await cursorWriter.write(data.value);
-        await cursorWriter.finish();
+        cursorWriter.write(data.value);
+        cursorWriter.finish();
         slot = cursorWriter.slot;
       }
     } else {
@@ -1090,8 +1090,8 @@ export class WriteData implements PathPartBase {
       slot = slot.withFull(true);
     }
 
-    await db.core.seek(position);
-    await writer.write(slot.toBytes());
+    db.core.seek(position);
+    writer.write(slot.toBytes());
 
     const nextSlotPtr = new SlotPointer(slotPtr.position, slot);
     return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr);
@@ -1102,23 +1102,23 @@ export class Context implements PathPartBase {
   readonly kind = 'Context';
   constructor(public fn: ContextFunction) {}
 
-  async readSlotPointer(
+  readSlotPointer(
     db: Database,
     isTopLevel: boolean,
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
     slotPtr: SlotPointer
-  ): Promise<SlotPointer> {
+  ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
     if (pathI !== path.length - 1) throw new PathPartMustBeAtEndException();
 
     const nextCursor = new WriteCursor(slotPtr, db);
     try {
-      await this.fn(nextCursor);
+      this.fn(nextCursor);
     } catch (e) {
       try {
-        await db.truncate();
+        db.truncate();
       } catch (_) {}
       throw e;
     }
@@ -1172,29 +1172,23 @@ export class Database {
   public header!: Header;
   public txStart: number | null = null;
 
-  private constructor(core: Core, hasher: Hasher) {
+  constructor(core: Core, hasher: Hasher) {
     this.core = core;
     this.hasher = hasher;
-  }
 
-  static async create(core: Core, hasher: Hasher): Promise<Database> {
-    const db = new Database(core, hasher);
-
-    await core.seek(0);
-    if ((await core.length()) === 0) {
-      db.header = new Header(hasher.id, hasher.digestLength, VERSION, Tag.NONE, MAGIC_NUMBER);
-      await db.header.write(core);
-      await core.flush();
+    core.seek(0);
+    if ((core.length()) === 0) {
+      this.header = new Header(hasher.id, hasher.digestLength, VERSION, Tag.NONE, MAGIC_NUMBER);
+      this.header.write(core);
+      core.flush();
     } else {
-      db.header = await Header.read(core);
-      db.header.validate();
-      if (db.header.hashSize !== hasher.digestLength) {
+      this.header = Header.read(core);
+      this.header.validate();
+      if (this.header.hashSize !== hasher.digestLength) {
         throw new InvalidHashSizeException();
       }
-      await db.truncate();
+      this.truncate();
     }
-
-    return db;
   }
 
   rootCursor(): WriteCursor {
@@ -1204,27 +1198,27 @@ export class Database {
     );
   }
 
-  async freeze(): Promise<void> {
+  freeze(): void {
     if (this.txStart !== null) {
-      this.txStart = await this.core.length();
+      this.txStart = this.core.length();
     } else {
       throw new ExpectedTxStartException();
     }
   }
 
-  async compact(targetCore: Core): Promise<Database> {
+  compact(targetCore: Core): Database {
     const offsetMap = new Map<number, number>();
     const hasher = new Hasher(this.hasher.algorithm, this.header.hashId);
-    const target = await Database.create(targetCore, hasher);
+    const target = new Database(targetCore, hasher);
 
     if (this.header.tag === Tag.NONE) return target;
     if (this.header.tag !== Tag.ARRAY_LIST) throw new UnexpectedTagException();
 
     // read source's top-level ArrayListHeader
-    await this.core.seek(Header.LENGTH);
+    this.core.seek(Header.LENGTH);
     const sourceReader = this.core.reader();
     const headerBytes = new Uint8Array(ArrayListHeader.LENGTH);
-    await sourceReader.readFully(headerBytes);
+    sourceReader.readFully(headerBytes);
     const sourceHeader = ArrayListHeader.fromBytes(headerBytes);
 
     if (sourceHeader.size === 0) return target;
@@ -1232,60 +1226,60 @@ export class Database {
     // read the last moment's slot
     const lastKey = sourceHeader.size - 1;
     const shift = lastKey < SLOT_COUNT ? 0 : Math.floor(Math.log(lastKey) / Math.log(SLOT_COUNT));
-    const lastSlotPtr = await this.readArrayListSlot(sourceHeader.ptr, lastKey, shift, WriteMode.READ_ONLY, true);
+    const lastSlotPtr = this.readArrayListSlot(sourceHeader.ptr, lastKey, shift, WriteMode.READ_ONLY, true);
     const momentSlot = lastSlotPtr.slot;
 
     // write TopLevelArrayListHeader + root index block to target
     const targetWriter = targetCore.writer();
-    await targetCore.seek(Header.LENGTH);
+    targetCore.seek(Header.LENGTH);
     const targetArrayListPtr = Header.LENGTH + TopLevelArrayListHeader.LENGTH;
-    await targetWriter.write(
+    targetWriter.write(
       new TopLevelArrayListHeader(0, new ArrayListHeader(targetArrayListPtr, 1)).toBytes()
     );
-    await targetWriter.write(new Uint8Array(INDEX_BLOCK_SIZE));
+    targetWriter.write(new Uint8Array(INDEX_BLOCK_SIZE));
 
     // recursively remap the moment slot
-    const remappedMoment = await remapSlot(this.core, targetCore, this.header.hashSize, offsetMap, momentSlot);
+    const remappedMoment = remapSlot(this.core, targetCore, this.header.hashSize, offsetMap, momentSlot);
 
     // write remapped moment slot into position 0 of target's root index block
-    await targetCore.seek(targetArrayListPtr);
-    await targetWriter.write(remappedMoment.toBytes());
+    targetCore.seek(targetArrayListPtr);
+    targetWriter.write(remappedMoment.toBytes());
 
     // update target's DatabaseHeader tag
     target.header = target.header.withTag(Tag.ARRAY_LIST);
-    await targetCore.seek(0);
-    await target.header.write(targetCore);
+    targetCore.seek(0);
+    target.header.write(targetCore);
 
     // flush, update file_size, flush again
-    await targetCore.flush();
-    const fileSize = await targetCore.length();
-    await targetCore.seek(Header.LENGTH + ArrayListHeader.LENGTH);
-    await targetWriter.writeLong(fileSize);
-    await targetCore.flush();
+    targetCore.flush();
+    const fileSize = targetCore.length();
+    targetCore.seek(Header.LENGTH + ArrayListHeader.LENGTH);
+    targetWriter.writeLong(fileSize);
+    targetCore.flush();
 
     return target;
   }
 
-  async truncate(): Promise<void> {
+  truncate(): void {
     if (this.header.tag !== Tag.ARRAY_LIST) return;
 
     const rootCursor = this.rootCursor();
-    const listSize = await rootCursor.count();
+    const listSize = rootCursor.count();
 
     if (listSize === 0) return;
 
-    await this.core.seek(Header.LENGTH + ArrayListHeader.LENGTH);
+    this.core.seek(Header.LENGTH + ArrayListHeader.LENGTH);
     const reader = this.core.reader();
-    const headerFileSize = await reader.readLong();
+    const headerFileSize = reader.readLong();
 
     if (headerFileSize === 0) return;
 
-    const fileSize = await this.core.length();
+    const fileSize = this.core.length();
 
     if (fileSize === headerFileSize) return;
 
     try {
-      await this.core.setLength(headerFileSize);
+      this.core.setLength(headerFileSize);
     } catch (_) {}
   }
 
@@ -1300,12 +1294,12 @@ export class Database {
     return this.checkHashBytes(target.hash);
   }
 
-  async readSlotPointer(
+  readSlotPointer(
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
     slotPtr: SlotPointer
-  ): Promise<SlotPointer> {
+  ): SlotPointer {
     if (pathI === path.length) {
       if (writeMode === WriteMode.READ_ONLY && slotPtr.slot.tag === Tag.NONE) {
         throw new KeyNotFoundException();
@@ -1318,11 +1312,11 @@ export class Database {
 
     const isTxStart = isTopLevel && this.header.tag === Tag.ARRAY_LIST && this.txStart === null;
     if (isTxStart) {
-      this.txStart = await this.core.length();
+      this.txStart = this.core.length();
     }
 
     try {
-      return await part.readSlotPointer(this, isTopLevel, writeMode, path, pathI, slotPtr);
+      return part.readSlotPointer(this, isTopLevel, writeMode, path, pathI, slotPtr);
     } finally {
       if (isTxStart) {
         this.txStart = null;
@@ -1331,14 +1325,14 @@ export class Database {
   }
 
   // HashMap methods
-  async readMapSlot(
+  readMapSlot(
     indexPos: number,
     keyHash: Uint8Array,
     keyOffset: number,
     writeMode: WriteMode,
     isTopLevel: boolean,
     target: HashMapGetTarget
-  ): Promise<HashMapGetResult> {
+  ): HashMapGetResult {
     if (keyOffset > (this.header.hashSize * 8) / BIT_COUNT) {
       throw new KeyOffsetExceededException();
     }
@@ -1348,9 +1342,9 @@ export class Database {
 
     const i = Number(bigIntShiftRight(keyHash, keyOffset * BIT_COUNT) & MASK);
     const slotPos = indexPos + Slot.LENGTH * i;
-    await this.core.seek(slotPos);
+    this.core.seek(slotPos);
     const slotBytes = new Uint8Array(Slot.LENGTH);
-    await reader.readFully(slotBytes);
+    reader.readFully(slotBytes);
     const slot = Slot.fromBytes(slotBytes);
 
     const ptr = Number(slot.value);
@@ -1361,16 +1355,16 @@ export class Database {
           case WriteMode.READ_ONLY:
             throw new KeyNotFoundException();
           case WriteMode.READ_WRITE: {
-            const hashPos = await this.core.length();
-            await this.core.seek(hashPos);
+            const hashPos = this.core.length();
+            this.core.seek(hashPos);
             const keySlotPos = hashPos + this.header.hashSize;
             const valueSlotPos = keySlotPos + Slot.LENGTH;
             const kvPair = new KeyValuePair(new Slot(), new Slot(), keyHash);
-            await writer.write(kvPair.toBytes());
+            writer.write(kvPair.toBytes());
 
             const nextSlot = new Slot(hashPos, Tag.KV_PAIR);
-            await this.core.seek(slotPos);
-            await writer.write(nextSlot.toBytes());
+            this.core.seek(slotPos);
+            writer.write(nextSlot.toBytes());
 
             let nextSlotPtr: SlotPointer;
             if (target.kind === 'kv_pair') {
@@ -1391,16 +1385,16 @@ export class Database {
         if (writeMode === WriteMode.READ_WRITE && !isTopLevel) {
           if (this.txStart !== null) {
             if (nextPtr < this.txStart) {
-              await this.core.seek(ptr);
+              this.core.seek(ptr);
               const indexBlock = new Uint8Array(INDEX_BLOCK_SIZE);
-              await reader.readFully(indexBlock);
+              reader.readFully(indexBlock);
 
-              nextPtr = await this.core.length();
-              await this.core.seek(nextPtr);
-              await writer.write(indexBlock);
+              nextPtr = this.core.length();
+              this.core.seek(nextPtr);
+              writer.write(indexBlock);
 
-              await this.core.seek(slotPos);
-              await writer.write(new Slot(nextPtr, Tag.INDEX).toBytes());
+              this.core.seek(slotPos);
+              writer.write(new Slot(nextPtr, Tag.INDEX).toBytes());
             }
           } else if (this.header.tag === Tag.ARRAY_LIST) {
             throw new ExpectedTxStartException();
@@ -1409,24 +1403,24 @@ export class Database {
         return this.readMapSlot(nextPtr, keyHash, keyOffset + 1, writeMode, isTopLevel, target);
       }
       case Tag.KV_PAIR: {
-        await this.core.seek(ptr);
+        this.core.seek(ptr);
         const kvPairBytes = new Uint8Array(KeyValuePair.length(this.header.hashSize));
-        await reader.readFully(kvPairBytes);
+        reader.readFully(kvPairBytes);
         const kvPair = KeyValuePair.fromBytes(kvPairBytes, this.header.hashSize);
 
         if (arraysEqual(kvPair.hash, keyHash)) {
           if (writeMode === WriteMode.READ_WRITE && !isTopLevel) {
             if (this.txStart !== null) {
               if (ptr < this.txStart) {
-                const hashPos = await this.core.length();
-                await this.core.seek(hashPos);
+                const hashPos = this.core.length();
+                this.core.seek(hashPos);
                 const keySlotPos = hashPos + this.header.hashSize;
                 const valueSlotPos = keySlotPos + Slot.LENGTH;
-                await writer.write(kvPair.toBytes());
+                writer.write(kvPair.toBytes());
 
                 const nextSlot = new Slot(hashPos, Tag.KV_PAIR);
-                await this.core.seek(slotPos);
-                await writer.write(nextSlot.toBytes());
+                this.core.seek(slotPos);
+                writer.write(nextSlot.toBytes());
 
                 let nextSlotPtr: SlotPointer;
                 if (target.kind === 'kv_pair') {
@@ -1463,14 +1457,14 @@ export class Database {
                 throw new KeyOffsetExceededException();
               }
               const nextI = Number(bigIntShiftRight(kvPair.hash, (keyOffset + 1) * BIT_COUNT) & MASK);
-              const nextIndexPos = await this.core.length();
-              await this.core.seek(nextIndexPos);
-              await writer.write(new Uint8Array(INDEX_BLOCK_SIZE));
-              await this.core.seek(nextIndexPos + Slot.LENGTH * nextI);
-              await writer.write(slot.toBytes());
-              const res = await this.readMapSlot(nextIndexPos, keyHash, keyOffset + 1, writeMode, isTopLevel, target);
-              await this.core.seek(slotPos);
-              await writer.write(new Slot(nextIndexPos, Tag.INDEX).toBytes());
+              const nextIndexPos = this.core.length();
+              this.core.seek(nextIndexPos);
+              writer.write(new Uint8Array(INDEX_BLOCK_SIZE));
+              this.core.seek(nextIndexPos + Slot.LENGTH * nextI);
+              writer.write(slot.toBytes());
+              const res = this.readMapSlot(nextIndexPos, keyHash, keyOffset + 1, writeMode, isTopLevel, target);
+              this.core.seek(slotPos);
+              writer.write(new Slot(nextIndexPos, Tag.INDEX).toBytes());
               return res;
             }
             default:
@@ -1483,12 +1477,12 @@ export class Database {
     }
   }
 
-  async removeMapSlot(
+  removeMapSlot(
     indexPos: number,
     keyHash: Uint8Array,
     keyOffset: number,
     isTopLevel: boolean
-  ): Promise<Slot> {
+  ): Slot {
     if (keyOffset > (this.header.hashSize * 8) / BIT_COUNT) {
       throw new KeyOffsetExceededException();
     }
@@ -1497,9 +1491,9 @@ export class Database {
     const writer = this.core.writer();
 
     const slotBlock: Slot[] = new Array(SLOT_COUNT);
-    await this.core.seek(indexPos);
+    this.core.seek(indexPos);
     const indexBlock = new Uint8Array(INDEX_BLOCK_SIZE);
-    await reader.readFully(indexBlock);
+    reader.readFully(indexBlock);
     for (let i = 0; i < SLOT_COUNT; i++) {
       const slotBytes = indexBlock.slice(i * Slot.LENGTH, (i + 1) * Slot.LENGTH);
       slotBlock[i] = Slot.fromBytes(slotBytes);
@@ -1514,12 +1508,12 @@ export class Database {
       case Tag.NONE:
         throw new KeyNotFoundException();
       case Tag.INDEX:
-        nextSlot = await this.removeMapSlot(Number(slot.value), keyHash, keyOffset + 1, isTopLevel);
+        nextSlot = this.removeMapSlot(Number(slot.value), keyHash, keyOffset + 1, isTopLevel);
         break;
       case Tag.KV_PAIR: {
-        await this.core.seek(Number(slot.value));
+        this.core.seek(Number(slot.value));
         const kvPairBytes = new Uint8Array(KeyValuePair.length(this.header.hashSize));
-        await reader.readFully(kvPairBytes);
+        reader.readFully(kvPairBytes);
         const kvPair = KeyValuePair.fromBytes(kvPairBytes, this.header.hashSize);
         if (arraysEqual(kvPair.hash, keyHash)) {
           nextSlot = new Slot();
@@ -1533,8 +1527,8 @@ export class Database {
     }
 
     if (keyOffset === 0) {
-      await this.core.seek(slotPos);
-      await writer.write(nextSlot.toBytes());
+      this.core.seek(slotPos);
+      writer.write(nextSlot.toBytes());
       return new Slot(indexPos, Tag.INDEX);
     }
 
@@ -1566,12 +1560,12 @@ export class Database {
     if (!isTopLevel) {
       if (this.txStart !== null) {
         if (indexPos < this.txStart) {
-          const nextIndexPos = await this.core.length();
-          await this.core.seek(nextIndexPos);
-          await writer.write(indexBlock);
+          const nextIndexPos = this.core.length();
+          this.core.seek(nextIndexPos);
+          writer.write(indexBlock);
           const nextSlotPos = nextIndexPos + Slot.LENGTH * i;
-          await this.core.seek(nextSlotPos);
-          await writer.write(nextSlot.toBytes());
+          this.core.seek(nextSlotPos);
+          writer.write(nextSlot.toBytes());
           return new Slot(nextIndexPos, Tag.INDEX);
         }
       } else if (this.header.tag === Tag.ARRAY_LIST) {
@@ -1579,17 +1573,17 @@ export class Database {
       }
     }
 
-    await this.core.seek(slotPos);
-    await writer.write(nextSlot.toBytes());
+    this.core.seek(slotPos);
+    writer.write(nextSlot.toBytes());
     return new Slot(indexPos, Tag.INDEX);
   }
 
   // ArrayList methods
-  async readArrayListSlotAppend(
+  readArrayListSlotAppend(
     header: ArrayListHeader,
     writeMode: WriteMode,
     isTopLevel: boolean
-  ): Promise<ArrayListAppendResult> {
+  ): ArrayListAppendResult {
     const writer = this.core.writer();
 
     let indexPos = header.ptr;
@@ -1599,34 +1593,34 @@ export class Database {
     const nextShift = key < SLOT_COUNT ? 0 : Math.floor(Math.log(key) / Math.log(SLOT_COUNT));
 
     if (prevShift !== nextShift) {
-      const nextIndexPos = await this.core.length();
-      await this.core.seek(nextIndexPos);
-      await writer.write(new Uint8Array(INDEX_BLOCK_SIZE));
-      await this.core.seek(nextIndexPos);
-      await writer.write(new Slot(indexPos, Tag.INDEX).toBytes());
+      const nextIndexPos = this.core.length();
+      this.core.seek(nextIndexPos);
+      writer.write(new Uint8Array(INDEX_BLOCK_SIZE));
+      this.core.seek(nextIndexPos);
+      writer.write(new Slot(indexPos, Tag.INDEX).toBytes());
       indexPos = nextIndexPos;
     }
 
-    const slotPtr = await this.readArrayListSlot(indexPos, key, nextShift, writeMode, isTopLevel);
+    const slotPtr = this.readArrayListSlot(indexPos, key, nextShift, writeMode, isTopLevel);
     return new ArrayListAppendResult(new ArrayListHeader(indexPos, header.size + 1), slotPtr);
   }
 
-  async readArrayListSlot(
+  readArrayListSlot(
     indexPos: number,
     key: number,
     shift: number,
     writeMode: WriteMode,
     isTopLevel: boolean
-  ): Promise<SlotPointer> {
+  ): SlotPointer {
     if (shift >= MAX_BRANCH_LENGTH) throw new MaxShiftExceededException();
 
     const reader = this.core.reader();
 
     const i = (key >>> (shift * BIT_COUNT)) & (SLOT_COUNT - 1);
     const slotPos = indexPos + Slot.LENGTH * i;
-    await this.core.seek(slotPos);
+    this.core.seek(slotPos);
     const slotBytes = new Uint8Array(Slot.LENGTH);
-    await reader.readFully(slotBytes);
+    reader.readFully(slotBytes);
     const slot = Slot.fromBytes(slotBytes);
 
     if (shift === 0) {
@@ -1642,18 +1636,18 @@ export class Database {
             throw new KeyNotFoundException();
           case WriteMode.READ_WRITE: {
             const writer = this.core.writer();
-            const nextIndexPos = await this.core.length();
-            await this.core.seek(nextIndexPos);
-            await writer.write(new Uint8Array(INDEX_BLOCK_SIZE));
+            const nextIndexPos = this.core.length();
+            this.core.seek(nextIndexPos);
+            writer.write(new Uint8Array(INDEX_BLOCK_SIZE));
 
             if (isTopLevel) {
-              const fileSize = await this.core.length();
-              await this.core.seek(Header.LENGTH + ArrayListHeader.LENGTH);
-              await writer.writeLong(fileSize);
+              const fileSize = this.core.length();
+              this.core.seek(Header.LENGTH + ArrayListHeader.LENGTH);
+              writer.writeLong(fileSize);
             }
 
-            await this.core.seek(slotPos);
-            await writer.write(new Slot(nextIndexPos, Tag.INDEX).toBytes());
+            this.core.seek(slotPos);
+            writer.write(new Slot(nextIndexPos, Tag.INDEX).toBytes());
             return this.readArrayListSlot(nextIndexPos, key, shift - 1, writeMode, isTopLevel);
           }
           default:
@@ -1665,17 +1659,17 @@ export class Database {
         if (writeMode === WriteMode.READ_WRITE && !isTopLevel) {
           if (this.txStart !== null) {
             if (nextPtr < this.txStart) {
-              await this.core.seek(ptr);
+              this.core.seek(ptr);
               const indexBlock = new Uint8Array(INDEX_BLOCK_SIZE);
-              await reader.readFully(indexBlock);
+              reader.readFully(indexBlock);
 
               const writer = this.core.writer();
-              nextPtr = await this.core.length();
-              await this.core.seek(nextPtr);
-              await writer.write(indexBlock);
+              nextPtr = this.core.length();
+              this.core.seek(nextPtr);
+              writer.write(indexBlock);
 
-              await this.core.seek(slotPos);
-              await writer.write(new Slot(nextPtr, Tag.INDEX).toBytes());
+              this.core.seek(slotPos);
+              writer.write(new Slot(nextPtr, Tag.INDEX).toBytes());
             }
           } else if (this.header.tag === Tag.ARRAY_LIST) {
             throw new ExpectedTxStartException();
@@ -1688,7 +1682,7 @@ export class Database {
     }
   }
 
-  async readArrayListSlice(header: ArrayListHeader, size: number): Promise<ArrayListHeader> {
+  readArrayListSlice(header: ArrayListHeader, size: number): ArrayListHeader {
     const reader = this.core.reader();
 
     if (size > header.size || size < 0) {
@@ -1704,9 +1698,9 @@ export class Database {
       let shift = prevShift;
       let indexPos = header.ptr;
       while (shift > nextShift) {
-        await this.core.seek(indexPos);
+        this.core.seek(indexPos);
         const slotBytes = new Uint8Array(Slot.LENGTH);
-        await reader.readFully(slotBytes);
+        reader.readFully(slotBytes);
         const slot = Slot.fromBytes(slotBytes);
         shift -= 1;
         indexPos = Number(slot.value);
@@ -1716,11 +1710,11 @@ export class Database {
   }
 
   // LinkedArrayList methods
-  async readLinkedArrayListSlotAppend(
+  readLinkedArrayListSlotAppend(
     header: LinkedArrayListHeader,
     writeMode: WriteMode,
     isTopLevel: boolean
-  ): Promise<LinkedArrayListAppendResult> {
+  ): LinkedArrayListAppendResult {
     const writer = this.core.writer();
 
     let ptr = header.ptr;
@@ -1729,17 +1723,17 @@ export class Database {
 
     let slotPtr: LinkedArrayListSlotPointer;
     try {
-      slotPtr = await this.readLinkedArrayListSlot(ptr, key, shift, writeMode, isTopLevel);
+      slotPtr = this.readLinkedArrayListSlot(ptr, key, shift, writeMode, isTopLevel);
     } catch (e) {
       if (e instanceof NoAvailableSlotsException) {
-        const nextPtr = await this.core.length();
-        await this.core.seek(nextPtr);
-        await writer.write(new Uint8Array(LINKED_ARRAY_LIST_INDEX_BLOCK_SIZE));
-        await this.core.seek(nextPtr);
-        await writer.write(new LinkedArrayListSlot(header.size, new Slot(ptr, Tag.INDEX, true)).toBytes());
+        const nextPtr = this.core.length();
+        this.core.seek(nextPtr);
+        writer.write(new Uint8Array(LINKED_ARRAY_LIST_INDEX_BLOCK_SIZE));
+        this.core.seek(nextPtr);
+        writer.write(new LinkedArrayListSlot(header.size, new Slot(ptr, Tag.INDEX, true)).toBytes());
         ptr = nextPtr;
         shift += 1;
-        slotPtr = await this.readLinkedArrayListSlot(ptr, key, shift, writeMode, isTopLevel);
+        slotPtr = this.readLinkedArrayListSlot(ptr, key, shift, writeMode, isTopLevel);
       } else {
         throw e;
       }
@@ -1749,8 +1743,8 @@ export class Database {
     slotPtr = slotPtr.withSlotPointer(slotPtr.slotPtr.withSlot(newSlot));
     if (slotPtr.slotPtr.position === null) throw new CursorNotWriteableException();
     const position = slotPtr.slotPtr.position;
-    await this.core.seek(position);
-    await writer.write(new LinkedArrayListSlot(0, newSlot).toBytes());
+    this.core.seek(position);
+    writer.write(new LinkedArrayListSlot(0, newSlot).toBytes());
     if (header.size < SLOT_COUNT && shift > 0) {
       throw new MustSetNewSlotsToFullException();
     }
@@ -1822,22 +1816,22 @@ export class Database {
     return { key: nextKey, index: i };
   }
 
-  async readLinkedArrayListSlot(
+  readLinkedArrayListSlot(
     indexPos: number,
     key: number,
     shift: number,
     writeMode: WriteMode,
     isTopLevel: boolean
-  ): Promise<LinkedArrayListSlotPointer> {
+  ): LinkedArrayListSlotPointer {
     if (shift >= MAX_BRANCH_LENGTH) throw new MaxShiftExceededException();
 
     const reader = this.core.reader();
     const writer = this.core.writer();
 
     const slotBlock: LinkedArrayListSlot[] = new Array(SLOT_COUNT);
-    await this.core.seek(indexPos);
+    this.core.seek(indexPos);
     const indexBlock = new Uint8Array(LINKED_ARRAY_LIST_INDEX_BLOCK_SIZE);
-    await reader.readFully(indexBlock);
+    reader.readFully(indexBlock);
 
     for (let i = 0; i < SLOT_COUNT; i++) {
       const slotBytes = indexBlock.slice(i * LinkedArrayListSlot.LENGTH, (i + 1) * LinkedArrayListSlot.LENGTH);
@@ -1864,15 +1858,15 @@ export class Database {
           case WriteMode.READ_ONLY:
             throw new KeyNotFoundException();
           case WriteMode.READ_WRITE: {
-            const nextIndexPos = await this.core.length();
-            await this.core.seek(nextIndexPos);
-            await writer.write(new Uint8Array(LINKED_ARRAY_LIST_INDEX_BLOCK_SIZE));
+            const nextIndexPos = this.core.length();
+            this.core.seek(nextIndexPos);
+            writer.write(new Uint8Array(LINKED_ARRAY_LIST_INDEX_BLOCK_SIZE));
 
-            const nextSlotPtr = await this.readLinkedArrayListSlot(nextIndexPos, nextKey, shift - 1, writeMode, isTopLevel);
+            const nextSlotPtr = this.readLinkedArrayListSlot(nextIndexPos, nextKey, shift - 1, writeMode, isTopLevel);
             slotBlock[i] = slotBlock[i].withSize(nextSlotPtr.leafCount);
             const leafCount = Database.blockLeafCount(slotBlock, shift, i);
-            await this.core.seek(slotPos);
-            await writer.write(new LinkedArrayListSlot(nextSlotPtr.leafCount, new Slot(nextIndexPos, Tag.INDEX)).toBytes());
+            this.core.seek(slotPos);
+            writer.write(new LinkedArrayListSlot(nextSlotPtr.leafCount, new Slot(nextIndexPos, Tag.INDEX)).toBytes());
             return new LinkedArrayListSlotPointer(nextSlotPtr.slotPtr, leafCount);
           }
           default:
@@ -1884,27 +1878,27 @@ export class Database {
         if (writeMode === WriteMode.READ_WRITE && !isTopLevel) {
           if (this.txStart !== null) {
             if (nextPtr < this.txStart) {
-              await this.core.seek(ptr);
+              this.core.seek(ptr);
               const indexBlockCopy = new Uint8Array(LINKED_ARRAY_LIST_INDEX_BLOCK_SIZE);
-              await reader.readFully(indexBlockCopy);
+              reader.readFully(indexBlockCopy);
 
-              nextPtr = await this.core.length();
-              await this.core.seek(nextPtr);
-              await writer.write(indexBlockCopy);
+              nextPtr = this.core.length();
+              this.core.seek(nextPtr);
+              writer.write(indexBlockCopy);
             }
           } else if (this.header.tag === Tag.ARRAY_LIST) {
             throw new ExpectedTxStartException();
           }
         }
 
-        const nextSlotPtr = await this.readLinkedArrayListSlot(nextPtr, nextKey, shift - 1, writeMode, isTopLevel);
+        const nextSlotPtr = this.readLinkedArrayListSlot(nextPtr, nextKey, shift - 1, writeMode, isTopLevel);
 
         slotBlock[i] = slotBlock[i].withSize(nextSlotPtr.leafCount);
         const leafCount = Database.blockLeafCount(slotBlock, shift, i);
 
         if (writeMode === WriteMode.READ_WRITE && !isTopLevel) {
-          await this.core.seek(slotPos);
-          await writer.write(new LinkedArrayListSlot(nextSlotPtr.leafCount, new Slot(nextPtr, Tag.INDEX)).toBytes());
+          this.core.seek(slotPos);
+          writer.write(new LinkedArrayListSlot(nextSlotPtr.leafCount, new Slot(nextPtr, Tag.INDEX)).toBytes());
         }
 
         return new LinkedArrayListSlotPointer(nextSlotPtr.slotPtr, leafCount);
@@ -1914,18 +1908,18 @@ export class Database {
     }
   }
 
-  async readLinkedArrayListBlocks(
+  readLinkedArrayListBlocks(
     indexPos: number,
     key: number,
     shift: number,
     blocks: LinkedArrayListBlockInfo[]
-  ): Promise<void> {
+  ): void {
     const reader = this.core.reader();
 
     const slotBlock: LinkedArrayListSlot[] = new Array(SLOT_COUNT);
-    await this.core.seek(indexPos);
+    this.core.seek(indexPos);
     const indexBlock = new Uint8Array(LINKED_ARRAY_LIST_INDEX_BLOCK_SIZE);
-    await reader.readFully(indexBlock);
+    reader.readFully(indexBlock);
 
     for (let i = 0; i < SLOT_COUNT; i++) {
       const slotBytes = indexBlock.slice(i * LinkedArrayListSlot.LENGTH, (i + 1) * LinkedArrayListSlot.LENGTH);
@@ -1949,7 +1943,7 @@ export class Database {
       case Tag.NONE:
         throw new EmptySlotException();
       case Tag.INDEX:
-        await this.readLinkedArrayListBlocks(Number(slot.slot.value), nextKey, shift - 1, blocks);
+        this.readLinkedArrayListBlocks(Number(slot.slot.value), nextKey, shift - 1, blocks);
         break;
       default:
         throw new UnexpectedTagException();
@@ -1962,11 +1956,11 @@ export class Database {
     }
   }
 
-  async readLinkedArrayListSlice(
+  readLinkedArrayListSlice(
     header: LinkedArrayListHeader,
     offset: number,
     size: number
-  ): Promise<LinkedArrayListHeader> {
+  ): LinkedArrayListHeader {
     const writer = this.core.writer();
 
     if (offset + size > header.size) {
@@ -1974,11 +1968,11 @@ export class Database {
     }
 
     const leftBlocks: LinkedArrayListBlockInfo[] = [];
-    await this.readLinkedArrayListBlocks(header.ptr, offset, header.shift, leftBlocks);
+    this.readLinkedArrayListBlocks(header.ptr, offset, header.shift, leftBlocks);
 
     const rightBlocks: LinkedArrayListBlockInfo[] = [];
     const rightKey = offset + size === 0 ? 0 : offset + size - 1;
-    await this.readLinkedArrayListBlocks(header.ptr, rightKey, header.shift, rightBlocks);
+    this.readLinkedArrayListBlocks(header.ptr, rightKey, header.shift, rightBlocks);
 
     const blockCount = leftBlocks.length;
     let nextSlots: (LinkedArrayListSlot | null)[] = [null, null];
@@ -2057,7 +2051,7 @@ export class Database {
 
       nextSlots = [null, null];
 
-      await this.core.seek(await this.core.length());
+      this.core.seek(this.core.length());
       for (let j = 0; j < 2; j++) {
         const blockMaybe = nextBlocks[j];
         const origBlockInfo = origBlockInfos[j];
@@ -2076,11 +2070,11 @@ export class Database {
           if (eql) {
             nextSlots[j] = origBlockInfo.parentSlot;
           } else {
-            const nextPtr = await this.core.position();
+            const nextPtr = this.core.position();
             let leafCount = 0;
             for (let k = 0; k < blockMaybe.length; k++) {
               const blockSlot = blockMaybe[k];
-              await writer.write(blockSlot.toBytes());
+              writer.write(blockSlot.toBytes());
               if (isLeafNode) {
                 if (!blockSlot.slot.empty()) {
                   leafCount += 1;
@@ -2108,18 +2102,18 @@ export class Database {
     return new LinkedArrayListHeader(nextShift, Number(rootSlot.slot.value), size);
   }
 
-  async readLinkedArrayListConcat(
+  readLinkedArrayListConcat(
     headerA: LinkedArrayListHeader,
     headerB: LinkedArrayListHeader
-  ): Promise<LinkedArrayListHeader> {
+  ): LinkedArrayListHeader {
     const writer = this.core.writer();
 
     const blocksA: LinkedArrayListBlockInfo[] = [];
     const keyA = headerA.size === 0 ? 0 : headerA.size - 1;
-    await this.readLinkedArrayListBlocks(headerA.ptr, keyA, headerA.shift, blocksA);
+    this.readLinkedArrayListBlocks(headerA.ptr, keyA, headerA.shift, blocksA);
 
     const blocksB: LinkedArrayListBlockInfo[] = [];
-    await this.readLinkedArrayListBlocks(headerB.ptr, 0, headerB.shift, blocksB);
+    this.readLinkedArrayListBlocks(headerB.ptr, 0, headerB.shift, blocksB);
 
     let nextSlots: (LinkedArrayListSlot | null)[] = [null, null];
     let nextShift = 0;
@@ -2220,7 +2214,7 @@ export class Database {
         }
       }
 
-      await this.core.seek(await this.core.length());
+      this.core.seek(this.core.length());
       for (let blockI = 0; blockI < blocks.length; blockI++) {
         const block = blocks[blockI];
 
@@ -2228,10 +2222,10 @@ export class Database {
           break;
         }
 
-        const nextPtr = await this.core.position();
+        const nextPtr = this.core.position();
         let leafCount = 0;
         for (const blockSlot of block) {
-          await writer.write(blockSlot.toBytes());
+          writer.write(blockSlot.toBytes());
           if (isLeafNode) {
             if (!blockSlot.slot.empty()) {
               leafCount += 1;
@@ -2253,9 +2247,9 @@ export class Database {
         block[0] = nextSlots[0];
         block[1] = nextSlots[1];
 
-        const newPtr = await this.core.length();
+        const newPtr = this.core.length();
         for (const blockSlot of block) {
-          await writer.write(blockSlot.toBytes());
+          writer.write(blockSlot.toBytes());
         }
 
         if (nextShift === MAX_BRANCH_LENGTH) throw new MaxShiftExceededException();
@@ -2275,13 +2269,13 @@ export class Database {
 
 // compaction helpers
 
-async function remapSlot(
+function remapSlot(
   sourceCore: Core,
   targetCore: Core,
   hashSize: number,
   offsetMap: Map<number, number>,
   slot: Slot
-): Promise<Slot> {
+): Slot {
   switch (slot.tag) {
     case Tag.NONE:
     case Tag.UINT:
@@ -2292,28 +2286,28 @@ async function remapSlot(
     case Tag.BYTES: {
       const mapped = offsetMap.get(Number(slot.value));
       if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
-      const newOffset = await remapBytes(sourceCore, targetCore, slot);
+      const newOffset = remapBytes(sourceCore, targetCore, slot);
       offsetMap.set(Number(slot.value), newOffset);
       return new Slot(newOffset, slot.tag, slot.full);
     }
     case Tag.INDEX: {
       const mapped = offsetMap.get(Number(slot.value));
       if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
-      const newOffset = await remapIndex(sourceCore, targetCore, hashSize, offsetMap, slot);
+      const newOffset = remapIndex(sourceCore, targetCore, hashSize, offsetMap, slot);
       offsetMap.set(Number(slot.value), newOffset);
       return new Slot(newOffset, slot.tag, slot.full);
     }
     case Tag.ARRAY_LIST: {
       const mapped = offsetMap.get(Number(slot.value));
       if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
-      const newOffset = await remapArrayList(sourceCore, targetCore, hashSize, offsetMap, slot);
+      const newOffset = remapArrayList(sourceCore, targetCore, hashSize, offsetMap, slot);
       offsetMap.set(Number(slot.value), newOffset);
       return new Slot(newOffset, slot.tag, slot.full);
     }
     case Tag.LINKED_ARRAY_LIST: {
       const mapped = offsetMap.get(Number(slot.value));
       if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
-      const newOffset = await remapLinkedArrayList(sourceCore, targetCore, hashSize, offsetMap, slot);
+      const newOffset = remapLinkedArrayList(sourceCore, targetCore, hashSize, offsetMap, slot);
       offsetMap.set(Number(slot.value), newOffset);
       return new Slot(newOffset, slot.tag, slot.full);
     }
@@ -2321,7 +2315,7 @@ async function remapSlot(
     case Tag.HASH_SET: {
       const mapped = offsetMap.get(Number(slot.value));
       if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
-      const newOffset = await remapHashMapOrSet(sourceCore, targetCore, hashSize, offsetMap, slot, false);
+      const newOffset = remapHashMapOrSet(sourceCore, targetCore, hashSize, offsetMap, slot, false);
       offsetMap.set(Number(slot.value), newOffset);
       return new Slot(newOffset, slot.tag, slot.full);
     }
@@ -2329,14 +2323,14 @@ async function remapSlot(
     case Tag.COUNTED_HASH_SET: {
       const mapped = offsetMap.get(Number(slot.value));
       if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
-      const newOffset = await remapHashMapOrSet(sourceCore, targetCore, hashSize, offsetMap, slot, true);
+      const newOffset = remapHashMapOrSet(sourceCore, targetCore, hashSize, offsetMap, slot, true);
       offsetMap.set(Number(slot.value), newOffset);
       return new Slot(newOffset, slot.tag, slot.full);
     }
     case Tag.KV_PAIR: {
       const mapped = offsetMap.get(Number(slot.value));
       if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
-      const newOffset = await remapKvPair(sourceCore, targetCore, hashSize, offsetMap, slot);
+      const newOffset = remapKvPair(sourceCore, targetCore, hashSize, offsetMap, slot);
       offsetMap.set(Number(slot.value), newOffset);
       return new Slot(newOffset, slot.tag, slot.full);
     }
@@ -2345,134 +2339,134 @@ async function remapSlot(
   }
 }
 
-async function remapBytes(sourceCore: Core, targetCore: Core, slot: Slot): Promise<number> {
-  await sourceCore.seek(Number(slot.value));
+function remapBytes(sourceCore: Core, targetCore: Core, slot: Slot): number {
+  sourceCore.seek(Number(slot.value));
   const sourceReader = sourceCore.reader();
-  const length = await sourceReader.readLong();
+  const length = sourceReader.readLong();
 
   // total size: 8-byte length + bytes + optional 2-byte format_tag
   const formatTagSize = slot.full ? 2 : 0;
   const totalPayload = length + formatTagSize;
 
-  const newOffset = await targetCore.length();
-  await targetCore.seek(newOffset);
+  const newOffset = targetCore.length();
+  targetCore.seek(newOffset);
   const targetWriter = targetCore.writer();
-  await targetWriter.writeLong(length);
+  targetWriter.writeLong(length);
 
   // copy bytes in chunks
   let remaining = totalPayload;
   while (remaining > 0) {
     const chunk = Math.min(remaining, 4096);
     const buf = new Uint8Array(chunk);
-    await sourceReader.readFully(buf);
-    await targetWriter.write(buf);
+    sourceReader.readFully(buf);
+    targetWriter.write(buf);
     remaining -= chunk;
   }
 
   return newOffset;
 }
 
-async function remapIndex(
+function remapIndex(
   sourceCore: Core,
   targetCore: Core,
   hashSize: number,
   offsetMap: Map<number, number>,
   slot: Slot
-): Promise<number> {
+): number {
   // read 144-byte block (16 slots)
-  await sourceCore.seek(Number(slot.value));
+  sourceCore.seek(Number(slot.value));
   const sourceReader = sourceCore.reader();
   const blockBytes = new Uint8Array(INDEX_BLOCK_SIZE);
-  await sourceReader.readFully(blockBytes);
+  sourceReader.readFully(blockBytes);
 
   // remap each slot
   const remappedSlots: Slot[] = [];
   for (let i = 0; i < SLOT_COUNT; i++) {
     const slotBytes = blockBytes.slice(i * Slot.LENGTH, (i + 1) * Slot.LENGTH);
     const childSlot = Slot.fromBytes(slotBytes);
-    remappedSlots.push(await remapSlot(sourceCore, targetCore, hashSize, offsetMap, childSlot));
+    remappedSlots.push(remapSlot(sourceCore, targetCore, hashSize, offsetMap, childSlot));
   }
 
   // write remapped block to target
-  const newOffset = await targetCore.length();
-  await targetCore.seek(newOffset);
+  const newOffset = targetCore.length();
+  targetCore.seek(newOffset);
   const targetWriter = targetCore.writer();
   for (const s of remappedSlots) {
-    await targetWriter.write(s.toBytes());
+    targetWriter.write(s.toBytes());
   }
 
   return newOffset;
 }
 
-async function remapArrayList(
+function remapArrayList(
   sourceCore: Core,
   targetCore: Core,
   hashSize: number,
   offsetMap: Map<number, number>,
   slot: Slot
-): Promise<number> {
+): number {
   // read ArrayListHeader (16 bytes)
-  await sourceCore.seek(Number(slot.value));
+  sourceCore.seek(Number(slot.value));
   const sourceReader = sourceCore.reader();
   const headerBytes = new Uint8Array(ArrayListHeader.LENGTH);
-  await sourceReader.readFully(headerBytes);
+  sourceReader.readFully(headerBytes);
   const header = ArrayListHeader.fromBytes(headerBytes);
 
   // remap root index block pointer via remapSlot as an .index slot
   const indexSlot = new Slot(header.ptr, Tag.INDEX);
-  const remappedIndex = await remapSlot(sourceCore, targetCore, hashSize, offsetMap, indexSlot);
+  const remappedIndex = remapSlot(sourceCore, targetCore, hashSize, offsetMap, indexSlot);
 
   // write new ArrayListHeader with remapped ptr
-  const newOffset = await targetCore.length();
-  await targetCore.seek(newOffset);
+  const newOffset = targetCore.length();
+  targetCore.seek(newOffset);
   const targetWriter = targetCore.writer();
-  await targetWriter.write(new ArrayListHeader(Number(remappedIndex.value), header.size).toBytes());
+  targetWriter.write(new ArrayListHeader(Number(remappedIndex.value), header.size).toBytes());
 
   return newOffset;
 }
 
-async function remapLinkedArrayList(
+function remapLinkedArrayList(
   sourceCore: Core,
   targetCore: Core,
   hashSize: number,
   offsetMap: Map<number, number>,
   slot: Slot
-): Promise<number> {
+): number {
   // read LinkedArrayListHeader (17 bytes)
-  await sourceCore.seek(Number(slot.value));
+  sourceCore.seek(Number(slot.value));
   const sourceReader = sourceCore.reader();
   const headerBytes = new Uint8Array(LinkedArrayListHeader.LENGTH);
-  await sourceReader.readFully(headerBytes);
+  sourceReader.readFully(headerBytes);
   const header = LinkedArrayListHeader.fromBytes(headerBytes);
 
   // remap root block
-  const remappedPtr = await remapLinkedArrayListBlock(sourceCore, targetCore, hashSize, offsetMap, header.ptr);
+  const remappedPtr = remapLinkedArrayListBlock(sourceCore, targetCore, hashSize, offsetMap, header.ptr);
 
   // write new header
-  const newOffset = await targetCore.length();
-  await targetCore.seek(newOffset);
+  const newOffset = targetCore.length();
+  targetCore.seek(newOffset);
   const targetWriter = targetCore.writer();
-  await targetWriter.write(new LinkedArrayListHeader(header.shift, remappedPtr, header.size).toBytes());
+  targetWriter.write(new LinkedArrayListHeader(header.shift, remappedPtr, header.size).toBytes());
 
   return newOffset;
 }
 
-async function remapLinkedArrayListBlock(
+function remapLinkedArrayListBlock(
   sourceCore: Core,
   targetCore: Core,
   hashSize: number,
   offsetMap: Map<number, number>,
   blockOffset: number
-): Promise<number> {
+): number {
   // dedup check
   const mapped = offsetMap.get(blockOffset);
   if (mapped !== undefined) return mapped;
 
   // read 272-byte block (16 x LinkedArrayListSlot of 17 bytes)
-  await sourceCore.seek(blockOffset);
+  sourceCore.seek(blockOffset);
   const sourceReader = sourceCore.reader();
   const blockBytes = new Uint8Array(LINKED_ARRAY_LIST_INDEX_BLOCK_SIZE);
-  await sourceReader.readFully(blockBytes);
+  sourceReader.readFully(blockBytes);
 
   // parse slots
   const slots: LinkedArrayListSlot[] = [];
@@ -2486,94 +2480,94 @@ async function remapLinkedArrayListBlock(
   for (const s of slots) {
     if (s.slot.tag === Tag.INDEX) {
       // index slots point to other 272-byte blocks, recurse on ourselves
-      const remappedPtr = await remapLinkedArrayListBlock(sourceCore, targetCore, hashSize, offsetMap, Number(s.slot.value));
+      const remappedPtr = remapLinkedArrayListBlock(sourceCore, targetCore, hashSize, offsetMap, Number(s.slot.value));
       remappedSlots.push(new LinkedArrayListSlot(s.size, new Slot(remappedPtr, Tag.INDEX, s.slot.full)));
     } else if (s.slot.empty()) {
       remappedSlots.push(s);
     } else {
       // leaf slot - remap via remapSlot
-      const remapped = await remapSlot(sourceCore, targetCore, hashSize, offsetMap, s.slot);
+      const remapped = remapSlot(sourceCore, targetCore, hashSize, offsetMap, s.slot);
       remappedSlots.push(new LinkedArrayListSlot(s.size, remapped));
     }
   }
 
   // write remapped block to target
-  const newOffset = await targetCore.length();
-  await targetCore.seek(newOffset);
+  const newOffset = targetCore.length();
+  targetCore.seek(newOffset);
   const targetWriter = targetCore.writer();
   for (const s of remappedSlots) {
-    await targetWriter.write(s.toBytes());
+    targetWriter.write(s.toBytes());
   }
 
   offsetMap.set(blockOffset, newOffset);
   return newOffset;
 }
 
-async function remapHashMapOrSet(
+function remapHashMapOrSet(
   sourceCore: Core,
   targetCore: Core,
   hashSize: number,
   offsetMap: Map<number, number>,
   slot: Slot,
   counted: boolean
-): Promise<number> {
-  await sourceCore.seek(Number(slot.value));
+): number {
+  sourceCore.seek(Number(slot.value));
   const sourceReader = sourceCore.reader();
 
   let countValue = -1;
   if (counted) {
-    countValue = await sourceReader.readLong();
+    countValue = sourceReader.readLong();
   }
 
   // read 144-byte root index block
   const blockBytes = new Uint8Array(INDEX_BLOCK_SIZE);
-  await sourceReader.readFully(blockBytes);
+  sourceReader.readFully(blockBytes);
 
   // remap each child slot in the block
   const remappedSlots: Slot[] = [];
   for (let i = 0; i < SLOT_COUNT; i++) {
     const slotBytes = blockBytes.slice(i * Slot.LENGTH, (i + 1) * Slot.LENGTH);
     const childSlot = Slot.fromBytes(slotBytes);
-    remappedSlots.push(await remapSlot(sourceCore, targetCore, hashSize, offsetMap, childSlot));
+    remappedSlots.push(remapSlot(sourceCore, targetCore, hashSize, offsetMap, childSlot));
   }
 
   // write [optional count][remapped block] contiguously to target
-  const newOffset = await targetCore.length();
-  await targetCore.seek(newOffset);
+  const newOffset = targetCore.length();
+  targetCore.seek(newOffset);
   const targetWriter = targetCore.writer();
   if (counted) {
-    await targetWriter.writeLong(countValue);
+    targetWriter.writeLong(countValue);
   }
   for (const s of remappedSlots) {
-    await targetWriter.write(s.toBytes());
+    targetWriter.write(s.toBytes());
   }
 
   return newOffset;
 }
 
-async function remapKvPair(
+function remapKvPair(
   sourceCore: Core,
   targetCore: Core,
   hashSize: number,
   offsetMap: Map<number, number>,
   slot: Slot
-): Promise<number> {
+): number {
   // read KeyValuePair
-  await sourceCore.seek(Number(slot.value));
+  sourceCore.seek(Number(slot.value));
   const sourceReader = sourceCore.reader();
   const kvPairBytes = new Uint8Array(KeyValuePair.length(hashSize));
-  await sourceReader.readFully(kvPairBytes);
+  sourceReader.readFully(kvPairBytes);
   const kvPair = KeyValuePair.fromBytes(kvPairBytes, hashSize);
 
   // remap key_slot and value_slot
-  const remappedKey = await remapSlot(sourceCore, targetCore, hashSize, offsetMap, kvPair.keySlot);
-  const remappedValue = await remapSlot(sourceCore, targetCore, hashSize, offsetMap, kvPair.valueSlot);
+  const remappedKey = remapSlot(sourceCore, targetCore, hashSize, offsetMap, kvPair.keySlot);
+  const remappedValue = remapSlot(sourceCore, targetCore, hashSize, offsetMap, kvPair.valueSlot);
 
   // write remapped KV pair (hash stays unchanged)
-  const newOffset = await targetCore.length();
-  await targetCore.seek(newOffset);
+  const newOffset = targetCore.length();
+  targetCore.seek(newOffset);
   const targetWriter = targetCore.writer();
-  await targetWriter.write(new KeyValuePair(remappedValue, remappedKey, kvPair.hash).toBytes());
+  targetWriter.write(new KeyValuePair(remappedValue, remappedKey, kvPair.hash).toBytes());
 
   return newOffset;
 }

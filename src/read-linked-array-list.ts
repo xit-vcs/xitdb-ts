@@ -27,23 +27,23 @@ export class ReadLinkedArrayList implements Slotted {
     return this.cursor.slot();
   }
 
-  async count(): Promise<number> {
+  count(): number {
     return this.cursor.count();
   }
 
-  async iterator(): Promise<CursorIterator> {
+  iterator(): CursorIterator {
     return this.cursor.iterator();
   }
 
-  async *[Symbol.asyncIterator](): AsyncIterator<ReadCursor> {
+  *[Symbol.iterator](): Iterator<ReadCursor> {
     yield* this.cursor;
   }
 
-  async getCursor(index: number): Promise<ReadCursor | null> {
+  getCursor(index: number): ReadCursor | null {
     return this.cursor.readPath([new LinkedArrayListGet(index)]);
   }
 
-  async getSlot(index: number): Promise<Slot | null> {
+  getSlot(index: number): Slot | null {
     return this.cursor.readPathSlot([new LinkedArrayListGet(index)]);
   }
 }

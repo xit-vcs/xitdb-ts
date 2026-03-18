@@ -12,56 +12,50 @@ import {
 import type { WriteableData } from './writeable-data';
 
 export class WriteArrayList extends ReadArrayList {
-  protected constructor() {
+  constructor(cursor: WriteCursor) {
     super();
+    this.cursor = cursor.writePath([new ArrayListInit()]);
   }
 
-  static async create(cursor: WriteCursor): Promise<WriteArrayList> {
-    const list = new WriteArrayList();
-    const newCursor = await cursor.writePath([new ArrayListInit()]);
-    list.cursor = newCursor;
-    return list;
-  }
-
-  override async iterator(): Promise<WriteCursorIterator> {
+  override iterator(): WriteCursorIterator {
     return (this.cursor as WriteCursor).iterator();
   }
 
-  override async *[Symbol.asyncIterator](): AsyncIterator<WriteCursor> {
+  override *[Symbol.iterator](): Iterator<WriteCursor> {
     yield* this.cursor as WriteCursor;
   }
 
-  async put(index: number, data: WriteableData): Promise<void> {
-    await (this.cursor as WriteCursor).writePath([
+  put(index: number, data: WriteableData): void {
+    (this.cursor as WriteCursor).writePath([
       new ArrayListGet(index),
       new WriteData(data),
     ]);
   }
 
-  async putCursor(index: number): Promise<WriteCursor> {
+  putCursor(index: number): WriteCursor {
     return (this.cursor as WriteCursor).writePath([new ArrayListGet(index)]);
   }
 
-  async append(data: WriteableData): Promise<void> {
-    await (this.cursor as WriteCursor).writePath([
+  append(data: WriteableData): void {
+    (this.cursor as WriteCursor).writePath([
       new ArrayListAppend(),
       new WriteData(data),
     ]);
   }
 
-  async appendCursor(): Promise<WriteCursor> {
+  appendCursor(): WriteCursor {
     return (this.cursor as WriteCursor).writePath([new ArrayListAppend()]);
   }
 
-  async appendContext(data: WriteableData | null, fn: ContextFunction): Promise<void> {
-    await (this.cursor as WriteCursor).writePath([
+  appendContext(data: WriteableData | null, fn: ContextFunction): void {
+    (this.cursor as WriteCursor).writePath([
       new ArrayListAppend(),
       new WriteData(data),
       new Context(fn),
     ]);
   }
 
-  async slice(size: number): Promise<void> {
-    await (this.cursor as WriteCursor).writePath([new ArrayListSlice(size)]);
+  slice(size: number): void {
+    (this.cursor as WriteCursor).writePath([new ArrayListSlice(size)]);
   }
 }

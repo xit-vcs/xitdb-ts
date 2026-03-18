@@ -35,27 +35,27 @@ export class WriteCursor extends ReadCursor {
     super(slotPtr, db);
   }
 
-  async writePath(path: PathPart[]): Promise<WriteCursor> {
-    const slotPtr = await this.db.readSlotPointer(WriteMode.READ_WRITE, path, 0, this.slotPtr);
+  writePath(path: PathPart[]): WriteCursor {
+    const slotPtr = this.db.readSlotPointer(WriteMode.READ_WRITE, path, 0, this.slotPtr);
     if (this.db.txStart === null) {
-      await this.db.core.sync();
+      this.db.core.sync();
     }
     return new WriteCursor(slotPtr, this.db);
   }
 
-  async write(data: WriteableData | null): Promise<void> {
-    const cursor = await this.writePath([new WriteData(data)]);
+  write(data: WriteableData | null): void {
+    const cursor = this.writePath([new WriteData(data)]);
     this.slotPtr = cursor.slotPtr;
   }
 
-  async writeIfEmpty(data: WriteableData): Promise<void> {
+  writeIfEmpty(data: WriteableData): void {
     if (this.slotPtr.slot.empty()) {
-      await this.write(data);
+      this.write(data);
     }
   }
 
-  override async readKeyValuePair(): Promise<WriteKeyValuePairCursor> {
-    const kvPairCursor = await super.readKeyValuePair();
+  override readKeyValuePair(): WriteKeyValuePairCursor {
+    const kvPairCursor = super.readKeyValuePair();
     return new WriteKeyValuePairCursor(
       new WriteCursor(kvPairCursor.valueCursor.slotPtr, this.db),
       new WriteCursor(kvPairCursor.keyCursor.slotPtr, this.db),
@@ -63,28 +63,28 @@ export class WriteCursor extends ReadCursor {
     );
   }
 
-  async writer(): Promise<Writer> {
+  writer(): Writer {
     const writer = this.db.core.writer();
-    const ptrPos = await this.db.core.length();
-    await this.db.core.seek(ptrPos);
-    await writer.writeLong(0);
-    const startPosition = await this.db.core.length();
+    const ptrPos = this.db.core.length();
+    this.db.core.seek(ptrPos);
+    writer.writeLong(0);
+    const startPosition = this.db.core.length();
     return new Writer(this, 0, new Slot(ptrPos, Tag.BYTES), startPosition, 0);
   }
 
-  override async *[Symbol.asyncIterator](): AsyncIterator<WriteCursor> {
-    const iterator = await this.iterator();
-    while (await iterator.hasNext()) {
-      const next = await iterator.next();
+  override *[Symbol.iterator](): Iterator<WriteCursor> {
+    const iterator = this.iterator();
+    while (iterator.hasNext()) {
+      const next = iterator.next();
       if (next !== null) {
         yield next;
       }
     }
   }
 
-  override async iterator(): Promise<WriteCursorIterator> {
+  override iterator(): WriteCursorIterator {
     const iterator = new WriteCursorIterator(this);
-    await iterator.init();
+    iterator.init();
     return iterator;
   }
 }
@@ -111,35 +111,35 @@ export class Writer {
     this.relativePosition = relativePosition;
   }
 
-  async write(buffer: Uint8Array): Promise<void> {
+  write(buffer: Uint8Array): void {
     if (this.size < this.relativePosition) throw new EndOfStreamException();
-    await this.parent.db.core.seek(this.startPosition + this.relativePosition);
+    this.parent.db.core.seek(this.startPosition + this.relativePosition);
     const writer = this.parent.db.core.writer();
-    await writer.write(buffer);
+    writer.write(buffer);
     this.relativePosition += buffer.length;
     if (this.relativePosition > this.size) {
       this.size = this.relativePosition;
     }
   }
 
-  async finish(): Promise<void> {
+  finish(): void {
     const writer = this.parent.db.core.writer();
 
     if (this.formatTag !== null) {
       this.slot = this.slot.withFull(true);
-      const formatTagPos = await this.parent.db.core.length();
-      await this.parent.db.core.seek(formatTagPos);
+      const formatTagPos = this.parent.db.core.length();
+      this.parent.db.core.seek(formatTagPos);
       if (this.startPosition + this.size !== formatTagPos) throw new UnexpectedWriterPositionException();
-      await writer.write(this.formatTag);
+      writer.write(this.formatTag);
     }
 
-    await this.parent.db.core.seek(Number(this.slot.value));
-    await writer.writeLong(this.size);
+    this.parent.db.core.seek(Number(this.slot.value));
+    writer.writeLong(this.size);
 
     if (this.parent.slotPtr.position === null) throw new CursorNotWriteableException();
     const position = this.parent.slotPtr.position;
-    await this.parent.db.core.seek(position);
-    await writer.write(this.slot.toBytes());
+    this.parent.db.core.seek(position);
+    writer.write(this.slot.toBytes());
 
     this.parent.slotPtr = this.parent.slotPtr.withSlot(this.slot);
   }
@@ -156,8 +156,8 @@ export class WriteCursorIterator extends CursorIterator {
     super(cursor);
   }
 
-  override async next(): Promise<WriteCursor | null> {
-    const readCursor = await super.next();
+  override next(): WriteCursor | null {
+    const readCursor = super.next();
     if (readCursor !== null) {
       return new WriteCursor(readCursor.slotPtr, readCursor.db);
     } else {

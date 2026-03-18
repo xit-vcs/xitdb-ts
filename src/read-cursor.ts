@@ -46,9 +46,9 @@ export class ReadCursor implements Slotted {
     return this.slotPtr.slot;
   }
 
-  async readPath(path: PathPart[]): Promise<ReadCursor | null> {
+  readPath(path: PathPart[]): ReadCursor | null {
     try {
-      const slotPtr = await this.db.readSlotPointer(WriteMode.READ_ONLY, path, 0, this.slotPtr);
+      const slotPtr = this.db.readSlotPointer(WriteMode.READ_ONLY, path, 0, this.slotPtr);
       return new ReadCursor(slotPtr, this.db);
     } catch (e) {
       if (e instanceof KeyNotFoundException) {
@@ -58,9 +58,9 @@ export class ReadCursor implements Slotted {
     }
   }
 
-  async readPathSlot(path: PathPart[]): Promise<Slot | null> {
+  readPathSlot(path: PathPart[]): Slot | null {
     try {
-      const slotPtr = await this.db.readSlotPointer(WriteMode.READ_ONLY, path, 0, this.slotPtr);
+      const slotPtr = this.db.readSlotPointer(WriteMode.READ_ONLY, path, 0, this.slotPtr);
       if (!slotPtr.slot.empty()) {
         return slotPtr.slot;
       } else {
@@ -100,20 +100,20 @@ export class ReadCursor implements Slotted {
     return view.getFloat64(0, false);
   }
 
-  async readBytes(maxSizeMaybe: number | null = null): Promise<Uint8Array> {
-    const bytesObj = await this.readBytesObject(maxSizeMaybe);
+  readBytes(maxSizeMaybe: number | null = null): Uint8Array {
+    const bytesObj = this.readBytesObject(maxSizeMaybe);
     return bytesObj.value;
   }
 
-  async readBytesObject(maxSizeMaybe: number | null = null): Promise<Bytes> {
+  readBytesObject(maxSizeMaybe: number | null = null): Bytes {
     const reader = this.db.core.reader();
 
     switch (this.slotPtr.slot.tag) {
       case Tag.NONE:
         return new Bytes(new Uint8Array(0));
       case Tag.BYTES: {
-        await this.db.core.seek(Number(this.slotPtr.slot.value));
-        const valueSize = await reader.readLong();
+        this.db.core.seek(Number(this.slotPtr.slot.value));
+        const valueSize = reader.readLong();
 
         if (maxSizeMaybe !== null && valueSize > maxSizeMaybe) {
           throw new StreamTooLongException();
@@ -122,13 +122,13 @@ export class ReadCursor implements Slotted {
         const startPosition = this.db.core.position();
 
         const value = new Uint8Array(valueSize);
-        await reader.readFully(value);
+        reader.readFully(value);
 
         let formatTag: Uint8Array | null = null;
         if (this.slotPtr.slot.full) {
-          await this.db.core.seek(startPosition + valueSize);
+          this.db.core.seek(startPosition + valueSize);
           formatTag = new Uint8Array(2);
-          await reader.readFully(formatTag);
+          reader.readFully(formatTag);
         }
 
         return new Bytes(value, formatTag);
@@ -164,16 +164,16 @@ export class ReadCursor implements Slotted {
     }
   }
 
-  async readKeyValuePair(): Promise<KeyValuePairCursor> {
+  readKeyValuePair(): KeyValuePairCursor {
     const reader = this.db.core.reader();
 
     if (this.slotPtr.slot.tag !== Tag.KV_PAIR) {
       throw new UnexpectedTagException();
     }
 
-    await this.db.core.seek(Number(this.slotPtr.slot.value));
+    this.db.core.seek(Number(this.slotPtr.slot.value));
     const kvPairBytes = new Uint8Array(KeyValuePair.length(this.db.header.hashSize));
-    await reader.readFully(kvPairBytes);
+    reader.readFully(kvPairBytes);
     const kvPair = KeyValuePair.fromBytes(kvPairBytes, this.db.header.hashSize);
 
     const hashPos = Number(this.slotPtr.slot.value);
@@ -187,13 +187,13 @@ export class ReadCursor implements Slotted {
     );
   }
 
-  async reader(): Promise<Reader> {
+  reader(): Reader {
     const reader = this.db.core.reader();
 
     switch (this.slotPtr.slot.tag) {
       case Tag.BYTES: {
-        await this.db.core.seek(Number(this.slotPtr.slot.value));
-        const size = await reader.readLong();
+        this.db.core.seek(Number(this.slotPtr.slot.value));
+        const size = reader.readLong();
         const startPosition = this.db.core.position();
         return new Reader(this, size, startPosition, 0);
       }
@@ -220,27 +220,27 @@ export class ReadCursor implements Slotted {
     }
   }
 
-  async count(): Promise<number> {
+  count(): number {
     const reader = this.db.core.reader();
     switch (this.slotPtr.slot.tag) {
       case Tag.NONE:
         return 0;
       case Tag.ARRAY_LIST: {
-        await this.db.core.seek(Number(this.slotPtr.slot.value));
+        this.db.core.seek(Number(this.slotPtr.slot.value));
         const headerBytes = new Uint8Array(ArrayListHeader.LENGTH);
-        await reader.readFully(headerBytes);
+        reader.readFully(headerBytes);
         const header = ArrayListHeader.fromBytes(headerBytes);
         return header.size;
       }
       case Tag.LINKED_ARRAY_LIST: {
-        await this.db.core.seek(Number(this.slotPtr.slot.value));
+        this.db.core.seek(Number(this.slotPtr.slot.value));
         const headerBytes = new Uint8Array(LinkedArrayListHeader.LENGTH);
-        await reader.readFully(headerBytes);
+        reader.readFully(headerBytes);
         const header = LinkedArrayListHeader.fromBytes(headerBytes);
         return header.size;
       }
       case Tag.BYTES: {
-        await this.db.core.seek(Number(this.slotPtr.slot.value));
+        this.db.core.seek(Number(this.slotPtr.slot.value));
         return reader.readLong();
       }
       case Tag.SHORT_BYTES: {
@@ -261,7 +261,7 @@ export class ReadCursor implements Slotted {
       }
       case Tag.COUNTED_HASH_MAP:
       case Tag.COUNTED_HASH_SET: {
-        await this.db.core.seek(Number(this.slotPtr.slot.value));
+        this.db.core.seek(Number(this.slotPtr.slot.value));
         return reader.readLong();
       }
       default:
@@ -269,19 +269,19 @@ export class ReadCursor implements Slotted {
     }
   }
 
-  async *[Symbol.asyncIterator](): AsyncIterator<ReadCursor> {
-    const iterator = await this.iterator();
-    while (await iterator.hasNext()) {
-      const next = await iterator.next();
+  *[Symbol.iterator](): Iterator<ReadCursor> {
+    const iterator = this.iterator();
+    while (iterator.hasNext()) {
+      const next = iterator.next();
       if (next !== null) {
         yield next;
       }
     }
   }
 
-  async iterator(): Promise<CursorIterator> {
+  iterator(): CursorIterator {
     const iterator = new CursorIterator(this);
-    await iterator.init();
+    iterator.init();
     return iterator;
   }
 }
@@ -299,55 +299,55 @@ export class Reader {
     this.relativePosition = relativePosition;
   }
 
-  async read(buffer: Uint8Array): Promise<number> {
+  read(buffer: Uint8Array): number {
     if (this.size < this.relativePosition) throw new EndOfStreamException();
-    await this.parent.db.core.seek(this.startPosition + this.relativePosition);
+    this.parent.db.core.seek(this.startPosition + this.relativePosition);
     const readSize = Math.min(buffer.length, this.size - this.relativePosition);
     if (readSize === 0) return -1;
     const reader = this.parent.db.core.reader();
     const tempBuffer = new Uint8Array(readSize);
-    await reader.readFully(tempBuffer);
+    reader.readFully(tempBuffer);
     buffer.set(tempBuffer);
     this.relativePosition += readSize;
     return readSize;
   }
 
-  async readFully(buffer: Uint8Array): Promise<void> {
+  readFully(buffer: Uint8Array): void {
     if (this.size < this.relativePosition || this.size - this.relativePosition < buffer.length) {
       throw new EndOfStreamException();
     }
-    await this.parent.db.core.seek(this.startPosition + this.relativePosition);
+    this.parent.db.core.seek(this.startPosition + this.relativePosition);
     const reader = this.parent.db.core.reader();
-    await reader.readFully(buffer);
+    reader.readFully(buffer);
     this.relativePosition += buffer.length;
   }
 
-  async readByte(): Promise<number> {
+  readByte(): number {
     const bytes = new Uint8Array(1);
-    await this.readFully(bytes);
+    this.readFully(bytes);
     return bytes[0];
   }
 
-  async readShort(): Promise<number> {
+  readShort(): number {
     const readSize = 2;
     const bytes = new Uint8Array(readSize);
-    await this.readFully(bytes);
+    this.readFully(bytes);
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     return view.getInt16(0, false);
   }
 
-  async readInt(): Promise<number> {
+  readInt(): number {
     const readSize = 4;
     const bytes = new Uint8Array(readSize);
-    await this.readFully(bytes);
+    this.readFully(bytes);
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     return view.getInt32(0, false);
   }
 
-  async readLong(): Promise<number> {
+  readLong(): number {
     const readSize = 8;
     const bytes = new Uint8Array(readSize);
-    await this.readFully(bytes);
+    this.readFully(bytes);
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     return Number(view.getBigInt64(0, false));
   }
@@ -383,7 +383,7 @@ export class CursorIterator {
     this.cursor = cursor;
   }
 
-  async init(): Promise<void> {
+  init(): void {
     switch (this.cursor.slotPtr.slot.tag) {
       case Tag.NONE:
         this.size = 0;
@@ -392,50 +392,50 @@ export class CursorIterator {
         break;
       case Tag.ARRAY_LIST: {
         const position = Number(this.cursor.slotPtr.slot.value);
-        await this.cursor.db.core.seek(position);
+        this.cursor.db.core.seek(position);
         const reader = this.cursor.db.core.reader();
         const headerBytes = new Uint8Array(ArrayListHeader.LENGTH);
-        await reader.readFully(headerBytes);
+        reader.readFully(headerBytes);
         const header = ArrayListHeader.fromBytes(headerBytes);
-        this.size = await this.cursor.count();
+        this.size = this.cursor.count();
         this.index = 0;
-        this.stack = await this.initStack(this.cursor, header.ptr, INDEX_BLOCK_SIZE);
+        this.stack = this.initStack(this.cursor, header.ptr, INDEX_BLOCK_SIZE);
         break;
       }
       case Tag.LINKED_ARRAY_LIST: {
         const position = Number(this.cursor.slotPtr.slot.value);
-        await this.cursor.db.core.seek(position);
+        this.cursor.db.core.seek(position);
         const reader = this.cursor.db.core.reader();
         const headerBytes = new Uint8Array(LinkedArrayListHeader.LENGTH);
-        await reader.readFully(headerBytes);
+        reader.readFully(headerBytes);
         const header = LinkedArrayListHeader.fromBytes(headerBytes);
-        this.size = await this.cursor.count();
+        this.size = this.cursor.count();
         this.index = 0;
-        this.stack = await this.initStack(this.cursor, header.ptr, LINKED_ARRAY_LIST_INDEX_BLOCK_SIZE);
+        this.stack = this.initStack(this.cursor, header.ptr, LINKED_ARRAY_LIST_INDEX_BLOCK_SIZE);
         break;
       }
       case Tag.HASH_MAP:
       case Tag.HASH_SET:
         this.size = 0;
         this.index = 0;
-        this.stack = await this.initStack(this.cursor, Number(this.cursor.slotPtr.slot.value), INDEX_BLOCK_SIZE);
+        this.stack = this.initStack(this.cursor, Number(this.cursor.slotPtr.slot.value), INDEX_BLOCK_SIZE);
         break;
       case Tag.COUNTED_HASH_MAP:
       case Tag.COUNTED_HASH_SET:
         this.size = 0;
         this.index = 0;
-        this.stack = await this.initStack(this.cursor, Number(this.cursor.slotPtr.slot.value) + 8, INDEX_BLOCK_SIZE);
+        this.stack = this.initStack(this.cursor, Number(this.cursor.slotPtr.slot.value) + 8, INDEX_BLOCK_SIZE);
         break;
       default:
         throw new UnexpectedTagException();
     }
   }
 
-  private async initStack(cursor: ReadCursor, position: number, blockSize: number): Promise<IteratorLevel[]> {
-    await cursor.db.core.seek(position);
+  private initStack(cursor: ReadCursor, position: number, blockSize: number): IteratorLevel[] {
+    cursor.db.core.seek(position);
     const reader = cursor.db.core.reader();
     const indexBlockBytes = new Uint8Array(blockSize);
-    await reader.readFully(indexBlockBytes);
+    reader.readFully(indexBlockBytes);
 
     const indexBlock: Slot[] = new Array(SLOT_COUNT);
     const slotSize = blockSize / SLOT_COUNT;
@@ -447,7 +447,7 @@ export class CursorIterator {
     return [new IteratorLevel(position, indexBlock, 0)];
   }
 
-  async hasNext(): Promise<boolean> {
+  hasNext(): boolean {
     switch (this.cursor.slotPtr.slot.tag) {
       case Tag.NONE:
         return false;
@@ -460,7 +460,7 @@ export class CursorIterator {
       case Tag.COUNTED_HASH_MAP:
       case Tag.COUNTED_HASH_SET:
         if (this.nextCursorMaybe === null) {
-          this.nextCursorMaybe = await this.nextInternal(INDEX_BLOCK_SIZE);
+          this.nextCursorMaybe = this.nextInternal(INDEX_BLOCK_SIZE);
         }
         return this.nextCursorMaybe !== null;
       default:
@@ -468,16 +468,16 @@ export class CursorIterator {
     }
   }
 
-  async next(): Promise<ReadCursor | null> {
+  next(): ReadCursor | null {
     switch (this.cursor.slotPtr.slot.tag) {
       case Tag.NONE:
         return null;
       case Tag.ARRAY_LIST:
-        if (!(await this.hasNext())) return null;
+        if (!(this.hasNext())) return null;
         this.index += 1;
         return this.nextInternal(INDEX_BLOCK_SIZE);
       case Tag.LINKED_ARRAY_LIST:
-        if (!(await this.hasNext())) return null;
+        if (!(this.hasNext())) return null;
         this.index += 1;
         return this.nextInternal(LINKED_ARRAY_LIST_INDEX_BLOCK_SIZE);
       case Tag.HASH_MAP:
@@ -496,7 +496,7 @@ export class CursorIterator {
     }
   }
 
-  private async nextInternal(blockSize: number): Promise<ReadCursor | null> {
+  private nextInternal(blockSize: number): ReadCursor | null {
     while (this.stack.length > 0) {
       const level = this.stack[this.stack.length - 1];
       if (level.index === level.block.length) {
@@ -509,10 +509,10 @@ export class CursorIterator {
         const nextSlot = level.block[level.index];
         if (nextSlot.tag === Tag.INDEX) {
           const nextPos = Number(nextSlot.value);
-          await this.cursor.db.core.seek(nextPos);
+          this.cursor.db.core.seek(nextPos);
           const reader = this.cursor.db.core.reader();
           const indexBlockBytes = new Uint8Array(blockSize);
-          await reader.readFully(indexBlockBytes);
+          reader.readFully(indexBlockBytes);
 
           const indexBlock: Slot[] = new Array(SLOT_COUNT);
           const slotSize = blockSize / SLOT_COUNT;

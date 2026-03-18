@@ -8,7 +8,7 @@ import {
   Tag,
 } from 'xitdb';
 
-async function formatKey(cursor: ReadCursor): Promise<string> {
+function formatKey(cursor: ReadCursor): string {
   const tag = cursor.slotPtr.slot.tag;
 
   switch (tag) {
@@ -16,7 +16,7 @@ async function formatKey(cursor: ReadCursor): Promise<string> {
       return '(none)';
     case Tag.BYTES:
     case Tag.SHORT_BYTES: {
-      const bytes = await cursor.readBytes(null);
+      const bytes = cursor.readBytes(null);
       const text = new TextDecoder().decode(bytes);
       return `"${text}"`;
     }
@@ -31,13 +31,13 @@ async function formatKey(cursor: ReadCursor): Promise<string> {
   }
 }
 
-async function getKeyValue(cursor: ReadCursor): Promise<string | number> {
+function getKeyValue(cursor: ReadCursor): string | number {
   const tag = cursor.slotPtr.slot.tag;
 
   switch (tag) {
     case Tag.BYTES:
     case Tag.SHORT_BYTES: {
-      const bytes = await cursor.readBytes(null);
+      const bytes = cursor.readBytes(null);
       return new TextDecoder().decode(bytes);
     }
     case Tag.UINT:
@@ -51,7 +51,7 @@ async function getKeyValue(cursor: ReadCursor): Promise<string | number> {
   }
 }
 
-async function toJsonValue(cursor: ReadCursor, isRoot = false): Promise<unknown> {
+function toJsonValue(cursor: ReadCursor, isRoot = false): unknown {
   const tag = cursor.slotPtr.slot.tag;
 
   switch (tag) {
@@ -60,9 +60,9 @@ async function toJsonValue(cursor: ReadCursor, isRoot = false): Promise<unknown>
 
     case Tag.ARRAY_LIST: {
       const list = new ReadArrayList(cursor);
-      const count = await list.count();
+      const count = list.count();
       if (isRoot) {
-        const itemCursor = await list.getCursor(count - 1);
+        const itemCursor = list.getCursor(count - 1);
         if (itemCursor) {
           return toJsonValue(itemCursor);
         }
@@ -70,9 +70,9 @@ async function toJsonValue(cursor: ReadCursor, isRoot = false): Promise<unknown>
       }
       const result: unknown[] = [];
       for (let i = 0; i < count; i++) {
-        const itemCursor = await list.getCursor(i);
+        const itemCursor = list.getCursor(i);
         if (itemCursor) {
-          result.push(await toJsonValue(itemCursor));
+          result.push(toJsonValue(itemCursor));
         }
       }
       return result;
@@ -80,15 +80,15 @@ async function toJsonValue(cursor: ReadCursor, isRoot = false): Promise<unknown>
 
     case Tag.HASH_MAP:
     case Tag.COUNTED_HASH_MAP: {
-      const iter = await cursor.iterator();
+      const iter = cursor.iterator();
       const result: Record<string, unknown> = {};
 
-      while (await iter.hasNext()) {
-        const kvPairCursor = await iter.next();
+      while (iter.hasNext()) {
+        const kvPairCursor = iter.next();
         if (kvPairCursor) {
-          const kvPair = await kvPairCursor.readKeyValuePair();
-          const key = await getKeyValue(kvPair.keyCursor);
-          result[String(key)] = await toJsonValue(kvPair.valueCursor);
+          const kvPair = kvPairCursor.readKeyValuePair();
+          const key = getKeyValue(kvPair.keyCursor);
+          result[String(key)] = toJsonValue(kvPair.valueCursor);
         }
       }
       return result;
@@ -96,14 +96,14 @@ async function toJsonValue(cursor: ReadCursor, isRoot = false): Promise<unknown>
 
     case Tag.HASH_SET:
     case Tag.COUNTED_HASH_SET: {
-      const iter = await cursor.iterator();
+      const iter = cursor.iterator();
       const result: (string | number)[] = [];
 
-      while (await iter.hasNext()) {
-        const kvPairCursor = await iter.next();
+      while (iter.hasNext()) {
+        const kvPairCursor = iter.next();
         if (kvPairCursor) {
-          const kvPair = await kvPairCursor.readKeyValuePair();
-          const key = await getKeyValue(kvPair.keyCursor);
+          const kvPair = kvPairCursor.readKeyValuePair();
+          const key = getKeyValue(kvPair.keyCursor);
           result.push(key);
         }
       }
@@ -112,11 +112,11 @@ async function toJsonValue(cursor: ReadCursor, isRoot = false): Promise<unknown>
 
     case Tag.LINKED_ARRAY_LIST: {
       const result: unknown[] = [];
-      const iter = await cursor.iterator();
-      while (await iter.hasNext()) {
-        const itemCursor = await iter.next();
+      const iter = cursor.iterator();
+      while (iter.hasNext()) {
+        const itemCursor = iter.next();
         if (itemCursor) {
-          result.push(await toJsonValue(itemCursor));
+          result.push(toJsonValue(itemCursor));
         }
       }
       return result;
@@ -124,7 +124,7 @@ async function toJsonValue(cursor: ReadCursor, isRoot = false): Promise<unknown>
 
     case Tag.BYTES:
     case Tag.SHORT_BYTES: {
-      const bytesObj = await cursor.readBytesObject(null);
+      const bytesObj = cursor.readBytesObject(null);
       const text = new TextDecoder().decode(bytesObj.value);
       const isPrintable = /^[\x20-\x7E\n\r\t]*$/.test(text);
 
@@ -151,7 +151,7 @@ async function toJsonValue(cursor: ReadCursor, isRoot = false): Promise<unknown>
   }
 }
 
-async function printValue(cursor: ReadCursor, indent: string): Promise<void> {
+function printValue(cursor: ReadCursor, indent: string): void {
   const tag = cursor.slotPtr.slot.tag;
 
   switch (tag) {
@@ -161,19 +161,19 @@ async function printValue(cursor: ReadCursor, indent: string): Promise<void> {
 
     case Tag.ARRAY_LIST: {
       const list = new ReadArrayList(cursor);
-      const count = await list.count();
+      const count = list.count();
       console.log(`${indent}ArrayList[${count}]:`);
       if (indent == '') {
-        const itemCursor = await list.getCursor(count - 1);
+        const itemCursor = list.getCursor(count - 1);
         if (itemCursor) {
-          await printValue(itemCursor, indent + '    ');
+          printValue(itemCursor, indent + '    ');
         }
       } else {
         for (let i = 0; i < count; i++) {
-          const itemCursor = await list.getCursor(i);
+          const itemCursor = list.getCursor(i);
           if (itemCursor) {
             console.log(`${indent}  [${i}]:`);
-            await printValue(itemCursor, indent + '    ');
+            printValue(itemCursor, indent + '    ');
           }
         }
       }
@@ -182,14 +182,14 @@ async function printValue(cursor: ReadCursor, indent: string): Promise<void> {
 
     case Tag.HASH_MAP:
     case Tag.COUNTED_HASH_MAP: {
-      const iter = await cursor.iterator();
+      const iter = cursor.iterator();
       const entries: Array<{ key: string; valueCursor: ReadCursor }> = [];
 
-      while (await iter.hasNext()) {
-        const kvPairCursor = await iter.next();
+      while (iter.hasNext()) {
+        const kvPairCursor = iter.next();
         if (kvPairCursor) {
-          const kvPair = await kvPairCursor.readKeyValuePair();
-          const key = await formatKey(kvPair.keyCursor);
+          const kvPair = kvPairCursor.readKeyValuePair();
+          const key = formatKey(kvPair.keyCursor);
           entries.push({ key, valueCursor: kvPair.valueCursor });
         }
       }
@@ -199,21 +199,21 @@ async function printValue(cursor: ReadCursor, indent: string): Promise<void> {
 
       for (const entry of entries) {
         console.log(`${indent}  ${entry.key}:`);
-        await printValue(entry.valueCursor, indent + '    ');
+        printValue(entry.valueCursor, indent + '    ');
       }
       break;
     }
 
     case Tag.HASH_SET:
     case Tag.COUNTED_HASH_SET: {
-      const iter = await cursor.iterator();
+      const iter = cursor.iterator();
       const keys: string[] = [];
 
-      while (await iter.hasNext()) {
-        const kvPairCursor = await iter.next();
+      while (iter.hasNext()) {
+        const kvPairCursor = iter.next();
         if (kvPairCursor) {
-          const kvPair = await kvPairCursor.readKeyValuePair();
-          const key = await formatKey(kvPair.keyCursor);
+          const kvPair = kvPairCursor.readKeyValuePair();
+          const key = formatKey(kvPair.keyCursor);
           keys.push(key);
         }
       }
@@ -224,15 +224,15 @@ async function printValue(cursor: ReadCursor, indent: string): Promise<void> {
     }
 
     case Tag.LINKED_ARRAY_LIST: {
-      const count = await cursor.count();
+      const count = cursor.count();
       console.log(`${indent}LinkedArrayList[${count}]:`);
-      const iter = await cursor.iterator();
+      const iter = cursor.iterator();
       let i = 0;
-      while (await iter.hasNext()) {
-        const itemCursor = await iter.next();
+      while (iter.hasNext()) {
+        const itemCursor = iter.next();
         if (itemCursor) {
           console.log(`${indent}  [${i}]:`);
-          await printValue(itemCursor, indent + '    ');
+          printValue(itemCursor, indent + '    ');
         }
         i++;
       }
@@ -241,7 +241,7 @@ async function printValue(cursor: ReadCursor, indent: string): Promise<void> {
 
     case Tag.BYTES:
     case Tag.SHORT_BYTES: {
-      const bytesObj = await cursor.readBytesObject(null);
+      const bytesObj = cursor.readBytesObject(null);
       const text = new TextDecoder().decode(bytesObj.value);
       const isPrintable = /^[\x20-\x7E\n\r\t]*$/.test(text);
 
@@ -288,7 +288,7 @@ async function printValue(cursor: ReadCursor, indent: string): Promise<void> {
   }
 }
 
-async function main() {
+function main() {
   const args = process.argv.slice(2);
   const jsonFlag = args.includes('--json');
   const fileArgs = args.filter(arg => arg !== '--json');
@@ -301,19 +301,19 @@ async function main() {
   const filePath = fileArgs[0];
 
   try {
-    const core = await CoreBufferedFile.create(filePath);
+    const core = new CoreBufferedFile(filePath);
     const hasher = new Hasher('SHA-1');
-    const db = await Database.create(core, hasher);
+    const db = new Database(core, hasher);
 
     const rootCursor = db.rootCursor();
 
     if (jsonFlag) {
-      const json = await toJsonValue(rootCursor, true);
+      const json = toJsonValue(rootCursor, true);
       console.log(JSON.stringify(json, null, 2));
     } else {
       console.log(`Database: ${filePath}`);
       console.log('---');
-      await printValue(rootCursor, '');
+      printValue(rootCursor, '');
     }
 
   } catch (error) {

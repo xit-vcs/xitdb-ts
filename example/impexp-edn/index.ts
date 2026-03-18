@@ -8,7 +8,7 @@ function printUsage(): void {
   console.log('  bun run example/impexp-edn/index.ts export_edn <file.xdb>              Export xitdb database as EDN to stdout');
 }
 
-async function main(): Promise<void> {
+function main(): void {
   const args = process.argv.slice(2);
 
   if (args.length === 0) {
@@ -26,7 +26,7 @@ async function main(): Promise<void> {
       }
       const [, ednPath, dbPath] = args;
       try {
-        await importEdn(ednPath, dbPath);
+        importEdn(ednPath, dbPath);
         console.log(`Successfully imported ${ednPath} to ${dbPath}`);
       } catch (error) {
         console.error(`Error importing EDN: ${error}`);
@@ -42,7 +42,7 @@ async function main(): Promise<void> {
       }
       const [, dbPath] = args;
       try {
-        await exportEdn(dbPath);
+        exportEdn(dbPath);
       } catch (error) {
         console.error(`Error exporting EDN: ${error}`);
         process.exit(1);

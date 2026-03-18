@@ -14,69 +14,63 @@ import {
 import type { WriteableData } from './writeable-data';
 
 export class WriteLinkedArrayList extends ReadLinkedArrayList {
-  protected constructor() {
+  constructor(cursor: WriteCursor) {
     super();
+    this.cursor = cursor.writePath([new LinkedArrayListInit()]);
   }
 
-  static async create(cursor: WriteCursor): Promise<WriteLinkedArrayList> {
-    const list = new WriteLinkedArrayList();
-    const newCursor = await cursor.writePath([new LinkedArrayListInit()]);
-    list.cursor = newCursor;
-    return list;
-  }
-
-  override async iterator(): Promise<WriteCursorIterator> {
+  override iterator(): WriteCursorIterator {
     return (this.cursor as WriteCursor).iterator();
   }
 
-  override async *[Symbol.asyncIterator](): AsyncIterator<WriteCursor> {
+  override *[Symbol.iterator](): Iterator<WriteCursor> {
     yield* this.cursor as WriteCursor;
   }
 
-  async put(index: number, data: WriteableData): Promise<void> {
-    await (this.cursor as WriteCursor).writePath([
+  put(index: number, data: WriteableData): void {
+    (this.cursor as WriteCursor).writePath([
       new LinkedArrayListGet(index),
       new WriteData(data),
     ]);
   }
 
-  async putCursor(index: number): Promise<WriteCursor> {
+  putCursor(index: number): WriteCursor {
     return (this.cursor as WriteCursor).writePath([new LinkedArrayListGet(index)]);
   }
 
-  async append(data: WriteableData): Promise<void> {
-    await (this.cursor as WriteCursor).writePath([
+  append(data: WriteableData): void {
+    (this.cursor as WriteCursor).writePath([
       new LinkedArrayListAppend(),
       new WriteData(data),
     ]);
   }
 
-  async appendCursor(): Promise<WriteCursor> {
+  appendCursor(): WriteCursor {
     return (this.cursor as WriteCursor).writePath([new LinkedArrayListAppend()]);
   }
 
-  async slice(offset: number, size: number): Promise<void> {
-    await (this.cursor as WriteCursor).writePath([
+  slice(offset: number, size: number): void {
+    (this.cursor as WriteCursor).writePath([
       new LinkedArrayListSlice(offset, size),
     ]);
   }
 
-  async concat(list: Slot): Promise<void> {
-    await (this.cursor as WriteCursor).writePath([new LinkedArrayListConcat(list)]);
+  concat(list: Slot): void {
+    (this.cursor as WriteCursor).writePath([new LinkedArrayListConcat(list)]);
   }
 
-  async insert(index: number, data: WriteableData): Promise<void> {
-    await (this.cursor as WriteCursor).writePath([
+  insert(index: number, data: WriteableData): void {
+    (this.cursor as WriteCursor).writePath([
       new LinkedArrayListInsert(index),
       new WriteData(data),
     ]);
   }
 
-  async insertCursor(index: number): Promise<WriteCursor> {
+  insertCursor(index: number): WriteCursor {
     return (this.cursor as WriteCursor).writePath([new LinkedArrayListInsert(index)]);
   }
 
-  async remove(index: number): Promise<void> {
-    await (this.cursor as WriteCursor).writePath([new LinkedArrayListRemove(index)]);
+  remove(index: number): void {
+    (this.cursor as WriteCursor).writePath([new LinkedArrayListRemove(index)]);
   }
 }

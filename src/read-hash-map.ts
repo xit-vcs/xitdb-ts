@@ -29,57 +29,57 @@ export class ReadHashMap implements Slotted {
     return this.cursor.slot();
   }
 
-  async iterator(): Promise<CursorIterator> {
+  iterator(): CursorIterator {
     return this.cursor.iterator();
   }
 
-  async *[Symbol.asyncIterator](): AsyncIterator<ReadCursor> {
+  *[Symbol.iterator](): Iterator<ReadCursor> {
     yield* this.cursor;
   }
 
   // getCursor overloads
-  async getCursor(key: string): Promise<ReadCursor | null>;
-  async getCursor(key: Bytes): Promise<ReadCursor | null>;
-  async getCursor(hash: Uint8Array): Promise<ReadCursor | null>;
-  async getCursor(key: string | Bytes | Uint8Array): Promise<ReadCursor | null> {
-    const hash = await this.resolveHash(key);
+  getCursor(key: string): ReadCursor | null;
+  getCursor(key: Bytes): ReadCursor | null;
+  getCursor(hash: Uint8Array): ReadCursor | null;
+  getCursor(key: string | Bytes | Uint8Array): ReadCursor | null {
+    const hash = this.resolveHash(key);
     return this.cursor.readPath([new HashMapGet(new HashMapGetValue(hash))]);
   }
 
   // getSlot overloads
-  async getSlot(key: string): Promise<Slot | null>;
-  async getSlot(key: Bytes): Promise<Slot | null>;
-  async getSlot(hash: Uint8Array): Promise<Slot | null>;
-  async getSlot(key: string | Bytes | Uint8Array): Promise<Slot | null> {
-    const hash = await this.resolveHash(key);
+  getSlot(key: string): Slot | null;
+  getSlot(key: Bytes): Slot | null;
+  getSlot(hash: Uint8Array): Slot | null;
+  getSlot(key: string | Bytes | Uint8Array): Slot | null {
+    const hash = this.resolveHash(key);
     return this.cursor.readPathSlot([new HashMapGet(new HashMapGetValue(hash))]);
   }
 
   // getKeyCursor overloads
-  async getKeyCursor(key: string): Promise<ReadCursor | null>;
-  async getKeyCursor(key: Bytes): Promise<ReadCursor | null>;
-  async getKeyCursor(hash: Uint8Array): Promise<ReadCursor | null>;
-  async getKeyCursor(key: string | Bytes | Uint8Array): Promise<ReadCursor | null> {
-    const hash = await this.resolveHash(key);
+  getKeyCursor(key: string): ReadCursor | null;
+  getKeyCursor(key: Bytes): ReadCursor | null;
+  getKeyCursor(hash: Uint8Array): ReadCursor | null;
+  getKeyCursor(key: string | Bytes | Uint8Array): ReadCursor | null {
+    const hash = this.resolveHash(key);
     return this.cursor.readPath([new HashMapGet(new HashMapGetKey(hash))]);
   }
 
   // getKeySlot overloads
-  async getKeySlot(key: string): Promise<Slot | null>;
-  async getKeySlot(key: Bytes): Promise<Slot | null>;
-  async getKeySlot(hash: Uint8Array): Promise<Slot | null>;
-  async getKeySlot(key: string | Bytes | Uint8Array): Promise<Slot | null> {
-    const hash = await this.resolveHash(key);
+  getKeySlot(key: string): Slot | null;
+  getKeySlot(key: Bytes): Slot | null;
+  getKeySlot(hash: Uint8Array): Slot | null;
+  getKeySlot(key: string | Bytes | Uint8Array): Slot | null {
+    const hash = this.resolveHash(key);
     return this.cursor.readPathSlot([new HashMapGet(new HashMapGetKey(hash))]);
   }
 
   // getKeyValuePair overloads
-  async getKeyValuePair(key: string): Promise<KeyValuePairCursor | null>;
-  async getKeyValuePair(key: Bytes): Promise<KeyValuePairCursor | null>;
-  async getKeyValuePair(hash: Uint8Array): Promise<KeyValuePairCursor | null>;
-  async getKeyValuePair(key: string | Bytes | Uint8Array): Promise<KeyValuePairCursor | null> {
-    const hash = await this.resolveHash(key);
-    const cursor = await this.cursor.readPath([new HashMapGet(new HashMapGetKVPair(hash))]);
+  getKeyValuePair(key: string): KeyValuePairCursor | null;
+  getKeyValuePair(key: Bytes): KeyValuePairCursor | null;
+  getKeyValuePair(hash: Uint8Array): KeyValuePairCursor | null;
+  getKeyValuePair(key: string | Bytes | Uint8Array): KeyValuePairCursor | null {
+    const hash = this.resolveHash(key);
+    const cursor = this.cursor.readPath([new HashMapGet(new HashMapGetKVPair(hash))]);
     if (cursor === null) {
       return null;
     } else {
@@ -88,7 +88,7 @@ export class ReadHashMap implements Slotted {
   }
 
   // Helper to resolve key to hash
-  protected async resolveHash(key: string | Bytes | Uint8Array): Promise<Uint8Array> {
+  protected resolveHash(key: string | Bytes | Uint8Array): Uint8Array {
     if (key instanceof Uint8Array) {
       return key;
     } else if (typeof key === 'string') {

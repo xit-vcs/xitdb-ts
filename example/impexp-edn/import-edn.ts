@@ -18,20 +18,20 @@ const FORMAT_TAG_KEYWORD = 'kw';
 const FORMAT_TAG_SYMBOL = 'sy';
 const FORMAT_TAG_BOOLEAN = 'bl';
 
-export async function importEdn(ednPath: string, dbPath: string): Promise<void> {
-  const ednContent = await Bun.file(ednPath).text();
+export function importEdn(ednPath: string, dbPath: string): void {
+  const ednContent = Bun.file(ednPath).text();
   const edn = parseEDNString(ednContent) as EDNVal;
 
-  const core = await CoreBufferedFile.create(dbPath);
-  const db = await Database.create(core, new Hasher('SHA-1'));
+  const core = new CoreBufferedFile(dbPath);
+  const db = new Database(core, new Hasher('SHA-1'));
   const rootCursor = db.rootCursor();
-  const history = await WriteArrayList.create(rootCursor);
+  const history = new WriteArrayList(rootCursor);
 
-  await history.appendContext(null, async (cursor) => {
-    await writeEdnValue(cursor, edn);
+  history.appendContext(null, (cursor) => {
+    writeEdnValue(cursor, edn);
   });
 
-  await core.flush();
+  core.flush();
 }
 
 function isEdnMap(value: unknown): value is EDNMap {
@@ -54,7 +54,7 @@ function isEdnSymbol(value: unknown): value is EDNSymbol {
   return typeof value === 'object' && value !== null && 'sym' in value && typeof (value as EDNSymbol).sym === 'string';
 }
 
-async function writeEdnValue(cursor: WriteCursor, value: EDNVal): Promise<void> {
+function writeEdnValue(cursor: WriteCursor, value: EDNVal): void {
   // null (nil)
   if (value === null) {
     // Leave as NONE (default empty slot)
@@ -63,44 +63,44 @@ async function writeEdnValue(cursor: WriteCursor, value: EDNVal): Promise<void> 
 
   // boolean
   if (typeof value === 'boolean') {
-    await cursor.write(new Bytes(value ? 'true' : 'false', FORMAT_TAG_BOOLEAN));
+    cursor.write(new Bytes(value ? 'true' : 'false', FORMAT_TAG_BOOLEAN));
     return;
   }
 
   // number (integer or float)
   if (typeof value === 'number') {
     if (Number.isInteger(value)) {
-      await cursor.write(new Int(value));
+      cursor.write(new Int(value));
     } else {
-      await cursor.write(new Float(value));
+      cursor.write(new Float(value));
     }
     return;
   }
 
   // bigint
   if (typeof value === 'bigint') {
-    await cursor.write(new Int(Number(value)));
+    cursor.write(new Int(Number(value)));
     return;
   }
 
   // string
   if (typeof value === 'string') {
-    await cursor.write(new Bytes(value));
+    cursor.write(new Bytes(value));
     return;
   }
 
   // Date
   if (value instanceof Date) {
-    await cursor.write(new Bytes(value.toISOString()));
+    cursor.write(new Bytes(value.toISOString()));
     return;
   }
 
   // array (vector)
   if (Array.isArray(value)) {
-    const list = await WriteArrayList.create(cursor);
+    const list = new WriteArrayList(cursor);
     for (const element of value) {
-      const elementCursor = await list.appendCursor();
-      await writeEdnValue(elementCursor, element);
+      const elementCursor = list.appendCursor();
+      writeEdnValue(elementCursor, element);
     }
     return;
   }
@@ -108,45 +108,45 @@ async function writeEdnValue(cursor: WriteCursor, value: EDNVal): Promise<void> 
   // keyword
   if (isEdnKeyword(value)) {
     const keywordStr = `:${value.key}`;
-    await cursor.write(new Bytes(keywordStr, FORMAT_TAG_KEYWORD));
+    cursor.write(new Bytes(keywordStr, FORMAT_TAG_KEYWORD));
     return;
   }
 
   // symbol
   if (isEdnSymbol(value)) {
-    await cursor.write(new Bytes(value.sym, FORMAT_TAG_SYMBOL));
+    cursor.write(new Bytes(value.sym, FORMAT_TAG_SYMBOL));
     return;
   }
 
   // list
   if (isEdnList(value)) {
-    const list = await WriteLinkedArrayList.create(cursor);
+    const list = new WriteLinkedArrayList(cursor);
     for (const element of value.list) {
-      const elementCursor = await list.appendCursor();
-      await writeEdnValue(elementCursor, element);
+      const elementCursor = list.appendCursor();
+      writeEdnValue(elementCursor, element);
     }
     return;
   }
 
   // set
   if (isEdnSet(value)) {
-    const set = await WriteHashSet.create(cursor);
+    const set = new WriteHashSet(cursor);
     for (const element of value.set) {
       const elementBytes = ednValueToBytes(element);
-      const elementCursor = await set.putCursor(elementBytes);
-      await writeEdnValue(elementCursor, element);
+      const elementCursor = set.putCursor(elementBytes);
+      writeEdnValue(elementCursor, element);
     }
     return;
   }
 
   // map
   if (isEdnMap(value)) {
-    const map = await WriteHashMap.create(cursor);
+    const map = new WriteHashMap(cursor);
     for (const [key, val] of value.map) {
       const keyBytes = getMapKeyBytes(key);
-      const valueCursor = await map.putCursor(keyBytes);
-      await map.putKey(keyBytes, keyBytes);
-      await writeEdnValue(valueCursor, val);
+      const valueCursor = map.putCursor(keyBytes);
+      map.putKey(keyBytes, keyBytes);
+      writeEdnValue(valueCursor, val);
     }
     return;
   }

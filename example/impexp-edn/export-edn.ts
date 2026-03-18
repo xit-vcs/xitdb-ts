@@ -13,31 +13,31 @@ const FORMAT_TAG_KEYWORD = 'kw';
 const FORMAT_TAG_SYMBOL = 'sy';
 const FORMAT_TAG_BOOLEAN = 'bl';
 
-export async function exportEdn(dbPath: string): Promise<void> {
-  const core = await CoreBufferedFile.create(dbPath);
-  const db = await Database.create(core, new Hasher('SHA-1'));
+export function exportEdn(dbPath: string): void {
+  const core = new CoreBufferedFile(dbPath);
+  const db = new Database(core, new Hasher('SHA-1'));
   const rootCursor = db.rootCursor();
 
   const history = new ReadArrayList(rootCursor);
-  const count = await history.count();
+  const count = history.count();
 
   if (count === 0) {
     console.log('{}');
     return;
   }
 
-  const latest = await history.getCursor(count - 1);
+  const latest = history.getCursor(count - 1);
   if (!latest) {
     console.log('{}');
     return;
   }
 
-  const ednValue = await cursorToEdnValue(latest);
+  const ednValue = cursorToEdnValue(latest);
   const ednString = prettyPrintEdn(ednValue, 0);
   console.log(ednString);
 }
 
-async function cursorToEdnValue(cursor: ReadCursor): Promise<EDNVal> {
+function cursorToEdnValue(cursor: ReadCursor): EDNVal {
   const tag = cursor.slotPtr.slot.tag;
 
   switch (tag) {
@@ -46,7 +46,7 @@ async function cursorToEdnValue(cursor: ReadCursor): Promise<EDNVal> {
 
     case Tag.BYTES:
     case Tag.SHORT_BYTES: {
-      const bytesObj = await cursor.readBytesObject(null);
+      const bytesObj = cursor.readBytesObject(null);
       const text = new TextDecoder().decode(bytesObj.value);
 
       if (bytesObj.formatTag) {
@@ -75,12 +75,12 @@ async function cursorToEdnValue(cursor: ReadCursor): Promise<EDNVal> {
 
     case Tag.ARRAY_LIST: {
       const list = new ReadArrayList(cursor);
-      const count = await list.count();
+      const count = list.count();
       const elements: EDNVal[] = [];
       for (let i = 0; i < count; i++) {
-        const itemCursor = await list.getCursor(i);
+        const itemCursor = list.getCursor(i);
         if (itemCursor) {
-          elements.push(await cursorToEdnValue(itemCursor));
+          elements.push(cursorToEdnValue(itemCursor));
         }
       }
       return elements; // EDN vectors are plain arrays
@@ -88,11 +88,11 @@ async function cursorToEdnValue(cursor: ReadCursor): Promise<EDNVal> {
 
     case Tag.LINKED_ARRAY_LIST: {
       const elements: EDNVal[] = [];
-      const iter = await cursor.iterator();
-      while (await iter.hasNext()) {
-        const itemCursor = await iter.next();
+      const iter = cursor.iterator();
+      while (iter.hasNext()) {
+        const itemCursor = iter.next();
         if (itemCursor) {
-          elements.push(await cursorToEdnValue(itemCursor));
+          elements.push(cursorToEdnValue(itemCursor));
         }
       }
       return { list: elements } as EDNList;
@@ -101,13 +101,13 @@ async function cursorToEdnValue(cursor: ReadCursor): Promise<EDNVal> {
     case Tag.HASH_MAP:
     case Tag.COUNTED_HASH_MAP: {
       const entries: [EDNVal, EDNVal][] = [];
-      const iter = await cursor.iterator();
-      while (await iter.hasNext()) {
-        const kvPairCursor = await iter.next();
+      const iter = cursor.iterator();
+      while (iter.hasNext()) {
+        const kvPairCursor = iter.next();
         if (kvPairCursor) {
-          const kvPair = await kvPairCursor.readKeyValuePair();
-          const key = await cursorToEdnValue(kvPair.keyCursor);
-          const value = await cursorToEdnValue(kvPair.valueCursor);
+          const kvPair = kvPairCursor.readKeyValuePair();
+          const key = cursorToEdnValue(kvPair.keyCursor);
+          const value = cursorToEdnValue(kvPair.valueCursor);
           entries.push([key, value]);
         }
       }
@@ -117,12 +117,12 @@ async function cursorToEdnValue(cursor: ReadCursor): Promise<EDNVal> {
     case Tag.HASH_SET:
     case Tag.COUNTED_HASH_SET: {
       const elements: EDNVal[] = [];
-      const iter = await cursor.iterator();
-      while (await iter.hasNext()) {
-        const kvPairCursor = await iter.next();
+      const iter = cursor.iterator();
+      while (iter.hasNext()) {
+        const kvPairCursor = iter.next();
         if (kvPairCursor) {
-          const kvPair = await kvPairCursor.readKeyValuePair();
-          elements.push(await cursorToEdnValue(kvPair.keyCursor));
+          const kvPair = kvPairCursor.readKeyValuePair();
+          elements.push(cursorToEdnValue(kvPair.keyCursor));
         }
       }
       return { set: elements } as EDNSet;

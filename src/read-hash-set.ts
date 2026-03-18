@@ -29,34 +29,34 @@ export class ReadHashSet implements Slotted {
     return this.cursor.slot();
   }
 
-  async iterator(): Promise<CursorIterator> {
+  iterator(): CursorIterator {
     return this.cursor.iterator();
   }
 
-  async *[Symbol.asyncIterator](): AsyncIterator<ReadCursor> {
+  *[Symbol.iterator](): Iterator<ReadCursor> {
     yield* this.cursor;
   }
 
   // getCursor overloads
-  async getCursor(key: string): Promise<ReadCursor | null>;
-  async getCursor(key: Bytes): Promise<ReadCursor | null>;
-  async getCursor(hash: Uint8Array): Promise<ReadCursor | null>;
-  async getCursor(key: string | Bytes | Uint8Array): Promise<ReadCursor | null> {
-    const hash = await this.resolveHash(key);
+  getCursor(key: string): ReadCursor | null;
+  getCursor(key: Bytes): ReadCursor | null;
+  getCursor(hash: Uint8Array): ReadCursor | null;
+  getCursor(key: string | Bytes | Uint8Array): ReadCursor | null {
+    const hash = this.resolveHash(key);
     return this.cursor.readPath([new HashMapGet(new HashMapGetKey(hash))]);
   }
 
   // getSlot overloads
-  async getSlot(key: string): Promise<Slot | null>;
-  async getSlot(key: Bytes): Promise<Slot | null>;
-  async getSlot(hash: Uint8Array): Promise<Slot | null>;
-  async getSlot(key: string | Bytes | Uint8Array): Promise<Slot | null> {
-    const hash = await this.resolveHash(key);
+  getSlot(key: string): Slot | null;
+  getSlot(key: Bytes): Slot | null;
+  getSlot(hash: Uint8Array): Slot | null;
+  getSlot(key: string | Bytes | Uint8Array): Slot | null {
+    const hash = this.resolveHash(key);
     return this.cursor.readPathSlot([new HashMapGet(new HashMapGetKey(hash))]);
   }
 
   // Helper to resolve key to hash
-  protected async resolveHash(key: string | Bytes | Uint8Array): Promise<Uint8Array> {
+  protected resolveHash(key: string | Bytes | Uint8Array): Uint8Array {
     if (key instanceof Uint8Array) {
       return key;
     } else if (typeof key === 'string') {

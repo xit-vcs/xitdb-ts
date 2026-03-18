@@ -17,7 +17,7 @@ export class ReadCountedHashMap extends ReadHashMap {
     }
   }
 
-  async count(): Promise<number> {
+  count(): number {
     return this.cursor.count();
   }
 }

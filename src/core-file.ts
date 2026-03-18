@@ -1,27 +1,21 @@
 import type { Core, DataReader, DataWriter } from './core';
-import * as fs from 'fs/promises';
-import type { FileHandle } from 'fs/promises';
+import * as fs from 'fs';
 
 export class CoreFile implements Core {
   public filePath: string;
   private _position: number = 0;
-  public fileHandle: FileHandle;
+  public fd: number;
 
-  private constructor(filePath: string, fileHandle: FileHandle) {
+  constructor(filePath: string) {
     this.filePath = filePath;
-    this.fileHandle = fileHandle;
-  }
-
-  static async create(filePath: string): Promise<CoreFile> {
     // Create file if it doesn't exist
     try {
-      await fs.access(filePath);
+      fs.accessSync(filePath);
     } catch {
-      await fs.writeFile(filePath, new Uint8Array(0));
+      fs.writeFileSync(filePath, new Uint8Array(0));
     }
-    // Open file handle for reading and writing
-    const fileHandle = await fs.open(filePath, 'r+');
-    return new CoreFile(filePath, fileHandle);
+    // Open file for reading and writing
+    this.fd = fs.openSync(filePath, 'r+');
   }
 
   reader(): DataReader {
@@ -32,12 +26,12 @@ export class CoreFile implements Core {
     return new FileDataWriter(this);
   }
 
-  async length(): Promise<number> {
-    const stats = await this.fileHandle.stat();
+  length(): number {
+    const stats = fs.fstatSync(this.fd);
     return stats.size;
   }
 
-  async seek(pos: number): Promise<void> {
+  seek(pos: number): void {
     this._position = pos;
   }
 
@@ -45,21 +39,19 @@ export class CoreFile implements Core {
     return this._position;
   }
 
-  async setLength(len: number): Promise<void> {
-    await this.fileHandle.truncate(len);
+  setLength(len: number): void {
+    fs.ftruncateSync(this.fd, len);
   }
 
-  async flush(): Promise<void> {
+  flush(): void {
   }
 
-  async sync(): Promise<void> {
-    await this.fileHandle.sync();
+  sync(): void {
+    fs.fsyncSync(this.fd);
   }
 
   [Symbol.dispose]() {
-    import("fs").then(fs => {
-      fs.closeSync(this.fileHandle.fd);
-    });
+    fs.closeSync(this.fd);
   }
 }
 
@@ -70,35 +62,35 @@ class FileDataReader implements DataReader {
     this.core = core;
   }
 
-  async readFully(b: Uint8Array): Promise<void> {
+  readFully(b: Uint8Array): void {
     const position = this.core.position();
-    await this.core.fileHandle.readv([b], position);
+    fs.readSync(this.core.fd, b, 0, b.length, position);
     this.core.seek(position + b.length);
   }
 
-  async readByte(): Promise<number> {
+  readByte(): number {
     const bytes = new Uint8Array(1);
-    await this.readFully(bytes);
+    this.readFully(bytes);
     return bytes[0];
   }
 
-  async readShort(): Promise<number> {
+  readShort(): number {
     const bytes = new Uint8Array(2);
-    await this.readFully(bytes);
+    this.readFully(bytes);
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     return view.getInt16(0, false);
   }
 
-  async readInt(): Promise<number> {
+  readInt(): number {
     const bytes = new Uint8Array(4);
-    await this.readFully(bytes);
+    this.readFully(bytes);
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     return view.getInt32(0, false);
   }
 
-  async readLong(): Promise<number> {
+  readLong(): number {
     const bytes = new Uint8Array(8);
-    await this.readFully(bytes);
+    this.readFully(bytes);
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     return Number(view.getBigInt64(0, false));
   }
@@ -111,27 +103,27 @@ class FileDataWriter implements DataWriter {
     this.core = core;
   }
 
-  async write(buffer: Uint8Array): Promise<void> {
+  write(buffer: Uint8Array): void {
     const position = this.core.position();
-    await this.core.fileHandle.writev([buffer], position);
+    fs.writeSync(this.core.fd, buffer, 0, buffer.length, position);
     this.core.seek(position + buffer.length);
   }
 
-  async writeByte(v: number): Promise<void> {
-    await this.write(new Uint8Array([v & 0xff]));
+  writeByte(v: number): void {
+    this.write(new Uint8Array([v & 0xff]));
   }
 
-  async writeShort(v: number): Promise<void> {
+  writeShort(v: number): void {
     const buffer = new ArrayBuffer(2);
     const view = new DataView(buffer);
     view.setInt16(0, v, false);
-    await this.write(new Uint8Array(buffer));
+    this.write(new Uint8Array(buffer));
   }
 
-  async writeLong(v: number): Promise<void> {
+  writeLong(v: number): void {
     const buffer = new ArrayBuffer(8);
     const view = new DataView(buffer);
     view.setBigInt64(0, BigInt(v), false);
-    await this.write(new Uint8Array(buffer));
+    this.write(new Uint8Array(buffer));
   }
 }

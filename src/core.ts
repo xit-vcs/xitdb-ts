@@ -1,25 +1,25 @@
 export interface DataReader {
-  readFully(buffer: Uint8Array): Promise<void>;
-  readByte(): Promise<number>;
-  readShort(): Promise<number>;
-  readInt(): Promise<number>;
-  readLong(): Promise<number>;
+  readFully(buffer: Uint8Array): void;
+  readByte(): number;
+  readShort(): number;
+  readInt(): number;
+  readLong(): number;
 }
 
 export interface DataWriter {
-  write(buffer: Uint8Array): Promise<void>;
-  writeByte(v: number): Promise<void>;
-  writeShort(v: number): Promise<void>;
-  writeLong(v: number): Promise<void>;
+  write(buffer: Uint8Array): void;
+  writeByte(v: number): void;
+  writeShort(v: number): void;
+  writeLong(v: number): void;
 }
 
 export interface Core {
   reader(): DataReader;
   writer(): DataWriter;
-  length(): Promise<number>;
-  seek(pos: number): Promise<void>;
+  length(): number;
+  seek(pos: number): void;
   position(): number;
-  setLength(len: number): Promise<void>;
-  flush(): Promise<void>;
-  sync(): Promise<void>;
+  setLength(len: number): void;
+  flush(): void;
+  sync(): void;
 }

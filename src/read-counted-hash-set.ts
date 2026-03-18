@@ -17,7 +17,7 @@ export class ReadCountedHashSet extends ReadHashSet {
     }
   }
 
-  async count(): Promise<number> {
+  count(): number {
     return this.cursor.count();
   }
 }

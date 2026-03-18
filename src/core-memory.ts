@@ -15,11 +15,11 @@ export class CoreMemory implements Core {
     return this.memory;
   }
 
-  async length(): Promise<number> {
+  length(): number {
     return this.memory.size();
   }
 
-  async seek(pos: number): Promise<void> {
+  seek(pos: number): void {
     this.memory.seek(pos);
   }
 
@@ -27,15 +27,15 @@ export class CoreMemory implements Core {
     return this.memory.getPosition();
   }
 
-  async setLength(len: number): Promise<void> {
+  setLength(len: number): void {
     this.memory.setLength(len);
   }
 
-  async flush(): Promise<void> {
+  flush(): void {
     // no-op for in-memory
   }
 
-  async sync(): Promise<void> {
+  sync(): void {
     // no-op for in-memory
   }
 }
@@ -99,7 +99,7 @@ class RandomAccessMemory implements DataReader, DataWriter {
   }
 
   // DataWriter interface
-  async write(data: Uint8Array): Promise<void> {
+  write(data: Uint8Array): void {
     const pos = this._position;
     if (pos < this._count) {
       const bytesBeforeEnd = Math.min(data.length, this._count - pos);
@@ -122,26 +122,26 @@ class RandomAccessMemory implements DataReader, DataWriter {
     this._position = pos + data.length;
   }
 
-  async writeByte(v: number): Promise<void> {
-    await this.write(new Uint8Array([v & 0xff]));
+  writeByte(v: number): void {
+    this.write(new Uint8Array([v & 0xff]));
   }
 
-  async writeShort(v: number): Promise<void> {
+  writeShort(v: number): void {
     const buffer = new ArrayBuffer(2);
     const view = new DataView(buffer);
     view.setInt16(0, v, false); // big-endian
-    await this.write(new Uint8Array(buffer));
+    this.write(new Uint8Array(buffer));
   }
 
-  async writeLong(v: number): Promise<void> {
+  writeLong(v: number): void {
     const buffer = new ArrayBuffer(8);
     const view = new DataView(buffer);
     view.setBigInt64(0, BigInt(v), false);
-    await this.write(new Uint8Array(buffer));
+    this.write(new Uint8Array(buffer));
   }
 
   // DataReader interface
-  async readFully(b: Uint8Array): Promise<void> {
+  readFully(b: Uint8Array): void {
     const pos = this._position;
     if (pos + b.length > this._count) {
       throw new Error('End of stream');
@@ -150,29 +150,29 @@ class RandomAccessMemory implements DataReader, DataWriter {
     this._position = pos + b.length;
   }
 
-  async readByte(): Promise<number> {
+  readByte(): number {
     const bytes = new Uint8Array(1);
-    await this.readFully(bytes);
+    this.readFully(bytes);
     return bytes[0];
   }
 
-  async readShort(): Promise<number> {
+  readShort(): number {
     const bytes = new Uint8Array(2);
-    await this.readFully(bytes);
+    this.readFully(bytes);
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     return view.getInt16(0, false); // big-endian
   }
 
-  async readInt(): Promise<number> {
+  readInt(): number {
     const bytes = new Uint8Array(4);
-    await this.readFully(bytes);
+    this.readFully(bytes);
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     return view.getInt32(0, false); // big-endian
   }
 
-  async readLong(): Promise<number> {
+  readLong(): number {
     const bytes = new Uint8Array(8);
-    await this.readFully(bytes);
+    this.readFully(bytes);
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     return Number(view.getBigInt64(0, false));
   }
