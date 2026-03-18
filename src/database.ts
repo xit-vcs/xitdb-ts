@@ -1192,6 +1192,12 @@ export class Database {
   }
 
   rootCursor(): WriteCursor {
+    // if the header tag is none, try re-reading it.
+    // this may be necessary if the database was initialized on a different thread.
+    if (this.header.tag === Tag.NONE) {
+      this.core.seek(0);
+      this.header = Header.read(this.core);
+    }
     return new WriteCursor(
       new SlotPointer(null, new Slot(Header.LENGTH, this.header.tag)),
       this
