@@ -1,6 +1,6 @@
-import type { Core, DataReader, DataWriter } from './core';
-import { CoreFile } from './core-file';
-import { CoreMemory } from './core-memory';
+import type { Core, DataReader, DataWriter } from './core.js';
+import { CoreFile } from './core-file.js';
+import { CoreMemory } from './core-memory.js';
 
 export class CoreBufferedFile implements Core {
   public file: RandomAccessBufferedFile;

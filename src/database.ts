@@ -1,8 +1,8 @@
-import type { Core } from './core';
-import { Hasher } from './hasher';
-import { Tag, tagValueOf } from './tag';
-import { Slot } from './slot';
-import { SlotPointer } from './slot-pointer';
+import type { Core } from './core.js';
+import { Hasher } from './hasher.js';
+import { Tag, tagValueOf } from './tag.js';
+import { Slot } from './slot.js';
+import { SlotPointer } from './slot-pointer.js';
 import {
   InvalidDatabaseException,
   InvalidVersionException,
@@ -22,9 +22,9 @@ import {
   ExpectedRootNodeException,
   UnreachableException,
   MaxShiftExceededException,
-} from './exceptions';
-import { Bytes, Float, Int, Uint, type WriteableData } from './writeable-data';
-import { WriteCursor } from './write-cursor';
+} from './exceptions.js';
+import { Bytes, Float, Int, Uint, type WriteableData } from './writeable-data.js';
+import { WriteCursor } from './write-cursor.js';
 
 export const VERSION = 0;
 export const MAGIC_NUMBER = new Uint8Array([0x78, 0x69, 0x74]); // 'xit'

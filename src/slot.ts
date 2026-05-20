@@ -1,5 +1,5 @@
-import { Tag, tagValueOf } from './tag';
-import type { WriteableData } from './writeable-data';
+import { Tag, tagValueOf } from './tag.js';
+import type { WriteableData } from './writeable-data.js';
 
 export class Slot implements WriteableData {
   static readonly LENGTH = 9;

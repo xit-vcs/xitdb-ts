@@ -1,9 +1,9 @@
-import { Tag } from './tag';
-import { Slot } from './slot';
-import type { Slotted } from './slotted';
-import { ReadCursor, CursorIterator } from './read-cursor';
-import { LinkedArrayListGet } from './database';
-import { UnexpectedTagException } from './exceptions';
+import { Tag } from './tag.js';
+import { Slot } from './slot.js';
+import type { Slotted } from './slotted.js';
+import { ReadCursor, CursorIterator } from './read-cursor.js';
+import { LinkedArrayListGet } from './database.js';
+import { UnexpectedTagException } from './exceptions.js';
 
 export class ReadLinkedArrayList implements Slotted {
   public cursor!: ReadCursor;

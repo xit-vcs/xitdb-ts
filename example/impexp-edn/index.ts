@@ -1,11 +1,11 @@
-#!/usr/bin/env bun
+#!/usr/bin/env tsx
 import { importEdn } from './import-edn';
 import { exportEdn } from './export-edn';
 
 function printUsage(): void {
   console.log('Usage:');
-  console.log('  bun run example/impexp-edn/index.ts import_edn <file.edn> <output.xdb>  Import EDN file into xitdb database');
-  console.log('  bun run example/impexp-edn/index.ts export_edn <file.xdb>              Export xitdb database as EDN to stdout');
+  console.log('  tsx example/impexp-edn/index.ts import_edn <file.edn> <output.xdb>  Import EDN file into xitdb database');
+  console.log('  tsx example/impexp-edn/index.ts export_edn <file.xdb>              Export xitdb database as EDN to stdout');
 }
 
 function main(): void {
@@ -21,7 +21,7 @@ function main(): void {
   switch (command) {
     case 'import_edn': {
       if (args.length !== 3) {
-        console.error('Usage: bun run example/impexp-edn/index.ts import_edn <file.edn> <output.xdb>');
+        console.error('Usage: tsx example/impexp-edn/index.ts import_edn <file.edn> <output.xdb>');
         process.exit(1);
       }
       const [, ednPath, dbPath] = args;
@@ -37,7 +37,7 @@ function main(): void {
 
     case 'export_edn': {
       if (args.length !== 2) {
-        console.error('Usage: bun run example/impexp-edn/index.ts export_edn <file.xdb>');
+        console.error('Usage: tsx example/impexp-edn/index.ts export_edn <file.xdb>');
         process.exit(1);
       }
       const [, dbPath] = args;

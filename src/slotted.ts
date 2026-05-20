@@ -1,4 +1,4 @@
-import type { Slot } from './slot';
+import type { Slot } from './slot.js';
 
 export interface Slotted {
   slot(): Slot;

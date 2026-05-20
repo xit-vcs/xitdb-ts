@@ -1,7 +1,7 @@
-import { Tag } from './tag';
-import { WriteHashSet } from './write-hash-set';
-import { WriteCursor } from './write-cursor';
-import { UnexpectedTagException } from './exceptions';
+import { Tag } from './tag.js';
+import { WriteHashSet } from './write-hash-set.js';
+import { WriteCursor } from './write-cursor.js';
+import { UnexpectedTagException } from './exceptions.js';
 
 export class WriteCountedHashSet extends WriteHashSet {
   constructor(cursor: WriteCursor) {

@@ -1,23 +1,23 @@
-import { Tag } from './tag';
-import { Slot } from './slot';
-import { SlotPointer } from './slot-pointer';
+import { Tag } from './tag.js';
+import { Slot } from './slot.js';
+import { SlotPointer } from './slot-pointer.js';
 import {
   Database,
   WriteMode,
   WriteData,
   type PathPart,
-} from './database';
+} from './database.js';
 import {
   ReadCursor,
   KeyValuePairCursor,
   CursorIterator,
-} from './read-cursor';
+} from './read-cursor.js';
 import {
   CursorNotWriteableException,
   EndOfStreamException,
   UnexpectedWriterPositionException,
-} from './exceptions';
-import type { WriteableData } from './writeable-data';
+} from './exceptions.js';
+import type { WriteableData } from './writeable-data.js';
 
 export class WriteKeyValuePairCursor extends KeyValuePairCursor {
   override valueCursor: WriteCursor;

@@ -1,5 +1,5 @@
-import { ReadHashMap } from './read-hash-map';
-import { WriteCursor, WriteCursorIterator, WriteKeyValuePairCursor } from './write-cursor';
+import { ReadHashMap } from './read-hash-map.js';
+import { WriteCursor, WriteCursorIterator, WriteKeyValuePairCursor } from './write-cursor.js';
 import {
   HashMapInit,
   HashMapGet,
@@ -7,10 +7,10 @@ import {
   HashMapGetKey,
   HashMapRemove,
   WriteData,
-} from './database';
-import type { WriteableData } from './writeable-data';
-import { Bytes } from './writeable-data';
-import { KeyNotFoundException } from './exceptions';
+} from './database.js';
+import type { WriteableData } from './writeable-data.js';
+import { Bytes } from './writeable-data.js';
+import { KeyNotFoundException } from './exceptions.js';
 
 export class WriteHashMap extends ReadHashMap {
   constructor(cursor: WriteCursor, counted?: boolean);

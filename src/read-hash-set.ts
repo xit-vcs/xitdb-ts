@@ -1,10 +1,10 @@
-import { Tag } from './tag';
-import { Slot } from './slot';
-import type { Slotted } from './slotted';
-import { ReadCursor, CursorIterator } from './read-cursor';
-import { HashMapGet, HashMapGetKey } from './database';
-import { UnexpectedTagException } from './exceptions';
-import { Bytes } from './writeable-data';
+import { Tag } from './tag.js';
+import { Slot } from './slot.js';
+import type { Slotted } from './slotted.js';
+import { ReadCursor, CursorIterator } from './read-cursor.js';
+import { HashMapGet, HashMapGetKey } from './database.js';
+import { UnexpectedTagException } from './exceptions.js';
+import { Bytes } from './writeable-data.js';
 
 export class ReadHashSet implements Slotted {
   public cursor!: ReadCursor;

@@ -1,13 +1,13 @@
 // Tag
-export { Tag, tagValueOf } from './tag';
+export { Tag, tagValueOf } from './tag.js';
 
 // Slot
-export { Slot } from './slot';
-export { SlotPointer } from './slot-pointer';
-export type { Slotted } from './slotted';
+export { Slot } from './slot.js';
+export { SlotPointer } from './slot-pointer.js';
+export type { Slotted } from './slotted.js';
 
 // Writeable Data
-export { Uint, Int, Float, Bytes, type WriteableData } from './writeable-data';
+export { Uint, Int, Float, Bytes, type WriteableData } from './writeable-data.js';
 
 // Exceptions
 export {
@@ -36,14 +36,14 @@ export {
   InvalidFormatTagSizeException,
   UnexpectedWriterPositionException,
   MaxShiftExceededException,
-} from './exceptions';
+} from './exceptions.js';
 
 // Core
-export type { Core, DataReader, DataWriter } from './core';
-export { CoreMemory } from './core-memory';
-export { CoreFile } from './core-file';
-export { CoreBufferedFile } from './core-buffered-file';
-export { Hasher } from './hasher';
+export type { Core, DataReader, DataWriter } from './core.js';
+export { CoreMemory } from './core-memory.js';
+export { CoreFile } from './core-file.js';
+export { CoreBufferedFile } from './core-buffered-file.js';
+export { Hasher } from './hasher.js';
 
 // Database
 export {
@@ -89,22 +89,22 @@ export {
   HashMapGetKey,
   HashMapGetValue,
   type ContextFunction,
-} from './database';
+} from './database.js';
 
 // Cursors
-export { ReadCursor, Reader, CursorIterator, KeyValuePairCursor } from './read-cursor';
-export { WriteCursor, Writer, WriteCursorIterator, WriteKeyValuePairCursor } from './write-cursor';
+export { ReadCursor, Reader, CursorIterator, KeyValuePairCursor } from './read-cursor.js';
+export { WriteCursor, Writer, WriteCursorIterator, WriteKeyValuePairCursor } from './write-cursor.js';
 
 // Collections
-export { ReadArrayList } from './read-array-list';
-export { WriteArrayList } from './write-array-list';
-export { ReadHashMap } from './read-hash-map';
-export { WriteHashMap } from './write-hash-map';
-export { ReadHashSet } from './read-hash-set';
-export { WriteHashSet } from './write-hash-set';
-export { ReadLinkedArrayList } from './read-linked-array-list';
-export { WriteLinkedArrayList } from './write-linked-array-list';
-export { ReadCountedHashMap } from './read-counted-hash-map';
-export { WriteCountedHashMap } from './write-counted-hash-map';
-export { ReadCountedHashSet } from './read-counted-hash-set';
-export { WriteCountedHashSet } from './write-counted-hash-set';
+export { ReadArrayList } from './read-array-list.js';
+export { WriteArrayList } from './write-array-list.js';
+export { ReadHashMap } from './read-hash-map.js';
+export { WriteHashMap } from './write-hash-map.js';
+export { ReadHashSet } from './read-hash-set.js';
+export { WriteHashSet } from './write-hash-set.js';
+export { ReadLinkedArrayList } from './read-linked-array-list.js';
+export { WriteLinkedArrayList } from './write-linked-array-list.js';
+export { ReadCountedHashMap } from './read-counted-hash-map.js';
+export { WriteCountedHashMap } from './write-counted-hash-map.js';
+export { ReadCountedHashSet } from './read-counted-hash-set.js';
+export { WriteCountedHashSet } from './write-counted-hash-set.js';

@@ -1,4 +1,5 @@
-import { expect, test, describe } from 'bun:test';
+import { test, describe } from 'node:test';
+import { expect } from './expect.ts';
 import {
   Database,
   Tag,

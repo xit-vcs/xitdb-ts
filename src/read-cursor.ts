@@ -1,7 +1,7 @@
-import { Tag } from './tag';
-import { Slot } from './slot';
-import { SlotPointer } from './slot-pointer';
-import type { Slotted } from './slotted';
+import { Tag } from './tag.js';
+import { Slot } from './slot.js';
+import { SlotPointer } from './slot-pointer.js';
+import type { Slotted } from './slotted.js';
 import {
   Database,
   WriteMode,
@@ -14,7 +14,7 @@ import {
   LINKED_ARRAY_LIST_INDEX_BLOCK_SIZE,
   SLOT_COUNT,
   LinkedArrayListSlot,
-} from './database';
+} from './database.js';
 import {
   UnexpectedTagException,
   StreamTooLongException,
@@ -22,8 +22,8 @@ import {
   InvalidOffsetException,
   KeyNotFoundException,
   ExpectedUnsignedLongException,
-} from './exceptions';
-import { Bytes } from './writeable-data';
+} from './exceptions.js';
+import { Bytes } from './writeable-data.js';
 
 export class KeyValuePairCursor {
   constructor(

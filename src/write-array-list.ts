@@ -1,5 +1,5 @@
-import { ReadArrayList } from './read-array-list';
-import { WriteCursor, WriteCursorIterator } from './write-cursor';
+import { ReadArrayList } from './read-array-list.js';
+import { WriteCursor, WriteCursorIterator } from './write-cursor.js';
 import {
   ArrayListInit,
   ArrayListGet,
@@ -8,8 +8,8 @@ import {
   WriteData,
   Context,
   type ContextFunction,
-} from './database';
-import type { WriteableData } from './writeable-data';
+} from './database.js';
+import type { WriteableData } from './writeable-data.js';
 
 export class WriteArrayList extends ReadArrayList {
   constructor(cursor: WriteCursor) {

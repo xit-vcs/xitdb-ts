@@ -1,11 +1,12 @@
 {
   "compilerOptions": {
     "target": "ESNext",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "types": ["bun-types"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
     "strict": true,
     "declaration": true,
+    "preserveConstEnums": true,
     "outDir": "./dist",
     "rootDir": "./src",
     "esModuleInterop": true,

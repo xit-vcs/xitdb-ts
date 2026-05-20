@@ -6,15 +6,16 @@
     "impexp-edn": "./index.ts"
   },
   "scripts": {
-    "import": "bun run index.ts import_edn",
-    "export": "bun run index.ts export_edn"
+    "import": "tsx index.ts import_edn",
+    "export": "tsx index.ts export_edn"
   },
   "dependencies": {
     "edn-data": "^1.1.2",
     "xitdb": "file:../.."
   },
   "devDependencies": {
-    "@types/bun": "latest",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
     "typescript": "^5.3.0"
   }
 }

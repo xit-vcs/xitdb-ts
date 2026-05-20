@@ -1,4 +1,4 @@
-import { InvalidFormatTagSizeException, Uint64OverflowException, Int64OverflowException } from './exceptions';
+import { InvalidFormatTagSizeException, Uint64OverflowException, Int64OverflowException } from './exceptions.js';
 
 export interface WriteableData {}
 

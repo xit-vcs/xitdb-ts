@@ -1,6 +1,6 @@
-import { Slot } from './slot';
-import { ReadLinkedArrayList } from './read-linked-array-list';
-import { WriteCursor, WriteCursorIterator } from './write-cursor';
+import { Slot } from './slot.js';
+import { ReadLinkedArrayList } from './read-linked-array-list.js';
+import { WriteCursor, WriteCursorIterator } from './write-cursor.js';
 import {
   LinkedArrayListInit,
   LinkedArrayListGet,
@@ -10,8 +10,8 @@ import {
   LinkedArrayListInsert,
   LinkedArrayListRemove,
   WriteData,
-} from './database';
-import type { WriteableData } from './writeable-data';
+} from './database.js';
+import type { WriteableData } from './writeable-data.js';
 
 export class WriteLinkedArrayList extends ReadLinkedArrayList {
   constructor(cursor: WriteCursor) {

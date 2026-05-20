@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env tsx
 import {
   Database,
   Hasher,
@@ -294,7 +294,7 @@ function main() {
   const fileArgs = args.filter(arg => arg !== '--json');
 
   if (fileArgs.length < 1) {
-    console.error('Usage: bun run index.ts [--json] <database-file>');
+    console.error('Usage: tsx index.ts [--json] <database-file>');
     process.exit(1);
   }
 

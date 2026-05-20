@@ -8,15 +8,14 @@ First, build the xitdb library from the root directory:
 
 ```bash
 # From the xitdb-ts root directory
-bun run build
-bun run build:types
+npm run build
 ```
 
 Then install the dump-database dependencies:
 
 ```bash
 cd example/dump-database
-bun install
+npm install
 ```
 
 ## Usage
@@ -24,7 +23,7 @@ bun install
 ### Human-readable output (default)
 
 ```bash
-bun run index.ts <database-file>
+npx tsx index.ts <database-file>
 ```
 
 This displays the database structure in a hierarchical, indented format showing:
@@ -50,13 +49,13 @@ ArrayList[1]:
 ### JSON output
 
 ```bash
-bun run index.ts --json <database-file>
+npx tsx index.ts --json <database-file>
 ```
 
 Outputs the database content as formatted JSON, suitable for piping to other tools:
 
 ```bash
-bun run index.ts --json mydata.xdb | jq '.users'
+npx tsx index.ts --json mydata.xdb | jq '.users'
 ```
 
 Example output:
@@ -105,25 +104,25 @@ Example output:
 ```bash
 # From the impexp-edn directory
 cd ../impexp-edn
-bun run index.ts import_edn samples/simple.edn /tmp/test.xdb
+npx tsx index.ts import_edn samples/simple.edn /tmp/test.xdb
 
 # Then dump it
 cd ../dump-database
-bun run index.ts /tmp/test.xdb
-bun run index.ts --json /tmp/test.xdb
+npx tsx index.ts /tmp/test.xdb
+npx tsx index.ts --json /tmp/test.xdb
 ```
 
 ### Test with various database files
 
 ```bash
 # Human-readable dump
-bun run index.ts /path/to/database.xdb
+npx tsx index.ts /path/to/database.xdb
 
 # JSON dump
-bun run index.ts --json /path/to/database.xdb
+npx tsx index.ts --json /path/to/database.xdb
 
 # Pipe to jq for filtering
-bun run index.ts --json /path/to/database.xdb | jq 'keys'
+npx tsx index.ts --json /path/to/database.xdb | jq 'keys'
 ```
 
 ## Project Structure

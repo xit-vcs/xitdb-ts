@@ -1,4 +1,4 @@
-import type { Core, DataReader, DataWriter } from './core';
+import type { Core, DataReader, DataWriter } from './core.js';
 
 export class CoreMemory implements Core {
   public memory: RandomAccessMemory;

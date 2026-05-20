@@ -1,7 +1,7 @@
-import { Tag } from './tag';
-import { ReadHashSet } from './read-hash-set';
-import { ReadCursor } from './read-cursor';
-import { UnexpectedTagException } from './exceptions';
+import { Tag } from './tag.js';
+import { ReadHashSet } from './read-hash-set.js';
+import { ReadCursor } from './read-cursor.js';
+import { UnexpectedTagException } from './exceptions.js';
 
 export class ReadCountedHashSet extends ReadHashSet {
   constructor(cursor: ReadCursor) {

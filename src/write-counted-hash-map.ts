@@ -1,7 +1,7 @@
-import { Tag } from './tag';
-import { WriteHashMap } from './write-hash-map';
-import { WriteCursor } from './write-cursor';
-import { UnexpectedTagException } from './exceptions';
+import { Tag } from './tag.js';
+import { WriteHashMap } from './write-hash-map.js';
+import { WriteCursor } from './write-cursor.js';
+import { UnexpectedTagException } from './exceptions.js';
 
 export class WriteCountedHashMap extends WriteHashMap {
   constructor(cursor: WriteCursor) {

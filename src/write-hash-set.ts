@@ -1,9 +1,9 @@
-import { ReadHashSet } from './read-hash-set';
-import { WriteCursor, WriteCursorIterator } from './write-cursor';
-import { HashMapInit, HashMapGet, HashMapGetKey, HashMapRemove } from './database';
-import type { WriteableData } from './writeable-data';
-import { Bytes } from './writeable-data';
-import { KeyNotFoundException } from './exceptions';
+import { ReadHashSet } from './read-hash-set.js';
+import { WriteCursor, WriteCursorIterator } from './write-cursor.js';
+import { HashMapInit, HashMapGet, HashMapGetKey, HashMapRemove } from './database.js';
+import type { WriteableData } from './writeable-data.js';
+import { Bytes } from './writeable-data.js';
+import { KeyNotFoundException } from './exceptions.js';
 
 export class WriteHashSet extends ReadHashSet {
   constructor(cursor: WriteCursor, counted?: boolean);

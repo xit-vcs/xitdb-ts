@@ -1,4 +1,4 @@
-import type { Core, DataReader, DataWriter } from './core';
+import type { Core, DataReader, DataWriter } from './core.js';
 import * as fs from 'fs';
 
 export class CoreFile implements Core {

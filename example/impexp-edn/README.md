@@ -8,15 +8,14 @@ First, build the xitdb library from the root directory:
 
 ```bash
 # From the xitdb-ts root directory
-bun run build
-bun run build:types
+npm run build
 ```
 
 Then install the impexp-edn dependencies:
 
 ```bash
 cd example/impexp-edn
-bun install
+npm install
 ```
 
 ## Usage
@@ -24,23 +23,23 @@ bun install
 ### Import EDN to xitdb
 
 ```bash
-bun run index.ts import_edn <input.edn> <output.xdb>
+npx tsx index.ts import_edn <input.edn> <output.xdb>
 ```
 
 Example:
 ```bash
-bun run index.ts import_edn samples/simple.edn mydata.xdb
+npx tsx index.ts import_edn samples/simple.edn mydata.xdb
 ```
 
 ### Export xitdb to EDN
 
 ```bash
-bun run index.ts export_edn <input.xdb>
+npx tsx index.ts export_edn <input.xdb>
 ```
 
 The EDN output is printed to stdout. To save to a file:
 ```bash
-bun run index.ts export_edn mydata.xdb > output.edn
+npx tsx index.ts export_edn mydata.xdb > output.edn
 ```
 
 ## EDN to xitdb Type Mapping
@@ -81,8 +80,8 @@ The `samples/` directory contains example EDN files:
 # From the impexp-edn directory
 for f in samples/*.edn; do
   echo "=== Testing $f ==="
-  bun run index.ts import_edn "$f" /tmp/test.xdb
-  bun run index.ts export_edn /tmp/test.xdb
+  npx tsx index.ts import_edn "$f" /tmp/test.xdb
+  npx tsx index.ts export_edn /tmp/test.xdb
   echo
 done
 ```
@@ -91,18 +90,18 @@ done
 
 ```bash
 # Import, export, re-import, re-export - output should be identical
-bun run index.ts import_edn samples/simple.edn /tmp/test1.xdb
-bun run index.ts export_edn /tmp/test1.xdb > /tmp/output1.edn
-bun run index.ts import_edn /tmp/output1.edn /tmp/test2.xdb
-bun run index.ts export_edn /tmp/test2.xdb > /tmp/output2.edn
+npx tsx index.ts import_edn samples/simple.edn /tmp/test1.xdb
+npx tsx index.ts export_edn /tmp/test1.xdb > /tmp/output1.edn
+npx tsx index.ts import_edn /tmp/output1.edn /tmp/test2.xdb
+npx tsx index.ts export_edn /tmp/test2.xdb > /tmp/output2.edn
 diff /tmp/output1.edn /tmp/output2.edn && echo "Round-trip successful!"
 ```
 
 ### Test a specific file
 
 ```bash
-bun run index.ts import_edn samples/all-types.edn /tmp/test.xdb
-bun run index.ts export_edn /tmp/test.xdb
+npx tsx index.ts import_edn samples/all-types.edn /tmp/test.xdb
+npx tsx index.ts export_edn /tmp/test.xdb
 ```
 
 ## EDN Format Reference
