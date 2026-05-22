@@ -1,5 +1,5 @@
 import { test, describe } from 'node:test';
-import { expect } from './expect.ts';
+import assert from 'node:assert/strict';
 import {
   Database,
   Tag,
@@ -93,9 +93,7 @@ describe('High Level API', () => {
       const hasher = new Hasher('SHA-1');
       const db = new Database(core, hasher);
 
-      expect(() => new WriteLinkedArrayList(db.rootCursor())).toThrow(
-        InvalidTopLevelTypeException
-      );
+      assert.throws(() => new WriteLinkedArrayList(db.rootCursor()), InvalidTopLevelTypeException);
     }
   });
 
@@ -109,61 +107,61 @@ describe('High Level API', () => {
     // First moment
     {
       const momentCursor = history.getCursor(0);
-      expect(momentCursor).not.toBeNull();
+      assert.notStrictEqual(momentCursor, null);
       const moment = new ReadHashMap(momentCursor!);
 
       const fooCursor = moment.getCursor('foo');
-      expect(fooCursor).not.toBeNull();
+      assert.notStrictEqual(fooCursor, null);
       const fooValue = fooCursor!.readBytes(MAX_READ_BYTES);
-      expect(new TextDecoder().decode(fooValue)).toBe('foo');
+      assert.strictEqual(new TextDecoder().decode(fooValue), 'foo');
 
       const fooSlot = moment.getSlot('foo');
-      expect(fooSlot?.tag).toBe(Tag.SHORT_BYTES);
+      assert.strictEqual(fooSlot?.tag, Tag.SHORT_BYTES);
       const barSlot = moment.getSlot('bar');
-      expect(barSlot?.tag).toBe(Tag.SHORT_BYTES);
+      assert.strictEqual(barSlot?.tag, Tag.SHORT_BYTES);
 
       const fruitsCursor = moment.getCursor('fruits');
-      expect(fruitsCursor).not.toBeNull();
+      assert.notStrictEqual(fruitsCursor, null);
       const fruits = new ReadArrayList(fruitsCursor!);
-      expect(fruits.count()).toBe(3);
+      assert.strictEqual(fruits.count(), 3);
 
       const appleCursor = fruits.getCursor(0);
-      expect(appleCursor).not.toBeNull();
+      assert.notStrictEqual(appleCursor, null);
       const appleValue = appleCursor!.readBytes(MAX_READ_BYTES);
-      expect(new TextDecoder().decode(appleValue)).toBe('apple');
+      assert.strictEqual(new TextDecoder().decode(appleValue), 'apple');
 
       const peopleCursor = moment.getCursor('people');
-      expect(peopleCursor).not.toBeNull();
+      assert.notStrictEqual(peopleCursor, null);
       const people = new ReadArrayList(peopleCursor!);
-      expect(people.count()).toBe(2);
+      assert.strictEqual(people.count(), 2);
 
       const aliceCursor = people.getCursor(0);
-      expect(aliceCursor).not.toBeNull();
+      assert.notStrictEqual(aliceCursor, null);
       const alice = new ReadHashMap(aliceCursor!);
       const aliceAgeCursor = alice.getCursor('age');
-      expect(aliceAgeCursor).not.toBeNull();
-      expect(aliceAgeCursor!.readUint()).toBe(25);
+      assert.notStrictEqual(aliceAgeCursor, null);
+      assert.strictEqual(aliceAgeCursor!.readUint(), 25);
 
       const todosCursor = moment.getCursor('todos');
-      expect(todosCursor).not.toBeNull();
+      assert.notStrictEqual(todosCursor, null);
       const todos = new ReadLinkedArrayList(todosCursor!);
-      expect(todos.count()).toBe(3);
+      assert.strictEqual(todos.count(), 3);
 
       const todoCursor = todos.getCursor(0);
-      expect(todoCursor).not.toBeNull();
+      assert.notStrictEqual(todoCursor, null);
       const todoValue = todoCursor!.readBytes(MAX_READ_BYTES);
-      expect(new TextDecoder().decode(todoValue)).toBe('Pay the bills');
+      assert.strictEqual(new TextDecoder().decode(todoValue), 'Pay the bills');
 
       // Test iterating over people
       const peopleIter = people.iterator();
       while (peopleIter.hasNext()) {
         const personCursor = peopleIter.next();
-        expect(personCursor).not.toBeNull();
+        assert.notStrictEqual(personCursor, null);
         const person = new ReadHashMap(personCursor!);
         const personIter = person.iterator();
         while (personIter.hasNext()) {
           const kvPairCursor = personIter.next();
-          expect(kvPairCursor).not.toBeNull();
+          assert.notStrictEqual(kvPairCursor, null);
           kvPairCursor!.readKeyValuePair();
         }
       }
@@ -171,127 +169,127 @@ describe('High Level API', () => {
       // Counted hash map
       {
         const lettersCountedMapCursor = moment.getCursor('letters-counted-map');
-        expect(lettersCountedMapCursor).not.toBeNull();
+        assert.notStrictEqual(lettersCountedMapCursor, null);
         const lettersCountedMap = new ReadCountedHashMap(lettersCountedMapCursor!);
-        expect(lettersCountedMap.count()).toBe(2);
+        assert.strictEqual(lettersCountedMap.count(), 2);
 
         const iter = lettersCountedMap.iterator();
         let count = 0;
         while (iter.hasNext()) {
           const kvPairCursor = iter.next();
-          expect(kvPairCursor).not.toBeNull();
+          assert.notStrictEqual(kvPairCursor, null);
           const kvPair = kvPairCursor!.readKeyValuePair();
           kvPair.keyCursor.readBytes(MAX_READ_BYTES);
           count += 1;
         }
-        expect(count).toBe(2);
+        assert.strictEqual(count, 2);
       }
 
       // Hash set
       {
         const lettersSetCursor = moment.getCursor('letters-set');
-        expect(lettersSetCursor).not.toBeNull();
+        assert.notStrictEqual(lettersSetCursor, null);
         const lettersSet = new ReadHashSet(lettersSetCursor!);
-        expect(lettersSet.getCursor('a')).not.toBeNull();
-        expect(lettersSet.getCursor('c')).not.toBeNull();
+        assert.notStrictEqual(lettersSet.getCursor('a'), null);
+        assert.notStrictEqual(lettersSet.getCursor('c'), null);
 
         const iter = lettersSet.iterator();
         let count = 0;
         while (iter.hasNext()) {
           const kvPairCursor = iter.next();
-          expect(kvPairCursor).not.toBeNull();
+          assert.notStrictEqual(kvPairCursor, null);
           const kvPair = kvPairCursor!.readKeyValuePair();
           kvPair.keyCursor.readBytes(MAX_READ_BYTES);
           count += 1;
         }
-        expect(count).toBe(2);
+        assert.strictEqual(count, 2);
       }
 
       // Counted hash set
       {
         const lettersCountedSetCursor = moment.getCursor('letters-counted-set');
-        expect(lettersCountedSetCursor).not.toBeNull();
+        assert.notStrictEqual(lettersCountedSetCursor, null);
         const lettersCountedSet = new ReadCountedHashSet(lettersCountedSetCursor!);
-        expect(lettersCountedSet.count()).toBe(2);
+        assert.strictEqual(lettersCountedSet.count(), 2);
 
         const iter = lettersCountedSet.iterator();
         let count = 0;
         while (iter.hasNext()) {
           const kvPairCursor = iter.next();
-          expect(kvPairCursor).not.toBeNull();
+          assert.notStrictEqual(kvPairCursor, null);
           const kvPair = kvPairCursor!.readKeyValuePair();
           kvPair.keyCursor.readBytes(MAX_READ_BYTES);
           count += 1;
         }
-        expect(count).toBe(2);
+        assert.strictEqual(count, 2);
       }
     }
 
     // Second moment
     {
       const momentCursor = history.getCursor(1);
-      expect(momentCursor).not.toBeNull();
+      assert.notStrictEqual(momentCursor, null);
       const moment = new ReadHashMap(momentCursor!);
 
-      expect(moment.getCursor('bar')).toBeNull();
+      assert.strictEqual(moment.getCursor('bar'), null);
 
       const fruitsKeyCursor = moment.getKeyCursor('fruits');
-      expect(fruitsKeyCursor).not.toBeNull();
+      assert.notStrictEqual(fruitsKeyCursor, null);
       const fruitsKeyValue = fruitsKeyCursor!.readBytes(MAX_READ_BYTES);
-      expect(new TextDecoder().decode(fruitsKeyValue)).toBe('fruits');
+      assert.strictEqual(new TextDecoder().decode(fruitsKeyValue), 'fruits');
 
       const fruitsCursor = moment.getCursor('fruits');
-      expect(fruitsCursor).not.toBeNull();
+      assert.notStrictEqual(fruitsCursor, null);
       const fruits = new ReadArrayList(fruitsCursor!);
-      expect(fruits.count()).toBe(2);
+      assert.strictEqual(fruits.count(), 2);
 
       const fruitsKVCursor = moment.getKeyValuePair('fruits');
-      expect(fruitsKVCursor).not.toBeNull();
-      expect(fruitsKVCursor!.keyCursor.slotPtr.slot.tag).toBe(Tag.SHORT_BYTES);
-      expect(fruitsKVCursor!.valueCursor.slotPtr.slot.tag).toBe(Tag.ARRAY_LIST);
+      assert.notStrictEqual(fruitsKVCursor, null);
+      assert.strictEqual(fruitsKVCursor!.keyCursor.slotPtr.slot.tag, Tag.SHORT_BYTES);
+      assert.strictEqual(fruitsKVCursor!.valueCursor.slotPtr.slot.tag, Tag.ARRAY_LIST);
 
       const lemonCursor = fruits.getCursor(0);
-      expect(lemonCursor).not.toBeNull();
+      assert.notStrictEqual(lemonCursor, null);
       const lemonValue = lemonCursor!.readBytes(MAX_READ_BYTES);
-      expect(new TextDecoder().decode(lemonValue)).toBe('lemon');
+      assert.strictEqual(new TextDecoder().decode(lemonValue), 'lemon');
 
       const peopleCursor = moment.getCursor('people');
-      expect(peopleCursor).not.toBeNull();
+      assert.notStrictEqual(peopleCursor, null);
       const people = new ReadArrayList(peopleCursor!);
-      expect(people.count()).toBe(2);
+      assert.strictEqual(people.count(), 2);
 
       const aliceCursor = people.getCursor(0);
-      expect(aliceCursor).not.toBeNull();
+      assert.notStrictEqual(aliceCursor, null);
       const alice = new ReadHashMap(aliceCursor!);
       const aliceAgeCursor = alice.getCursor('age');
-      expect(aliceAgeCursor).not.toBeNull();
-      expect(aliceAgeCursor!.readUint()).toBe(26);
+      assert.notStrictEqual(aliceAgeCursor, null);
+      assert.strictEqual(aliceAgeCursor!.readUint(), 26);
 
       const todosCursor = moment.getCursor('todos');
-      expect(todosCursor).not.toBeNull();
+      assert.notStrictEqual(todosCursor, null);
       const todos = new ReadLinkedArrayList(todosCursor!);
-      expect(todos.count()).toBe(1);
+      assert.strictEqual(todos.count(), 1);
 
       const todoCursor = todos.getCursor(0);
-      expect(todoCursor).not.toBeNull();
+      assert.notStrictEqual(todoCursor, null);
       const todoValue = todoCursor!.readBytes(MAX_READ_BYTES);
-      expect(new TextDecoder().decode(todoValue)).toBe('Wash the car');
+      assert.strictEqual(new TextDecoder().decode(todoValue), 'Wash the car');
 
       const lettersCountedMapCursor = moment.getCursor('letters-counted-map');
-      expect(lettersCountedMapCursor).not.toBeNull();
+      assert.notStrictEqual(lettersCountedMapCursor, null);
       const lettersCountedMap = new ReadCountedHashMap(lettersCountedMapCursor!);
-      expect(lettersCountedMap.count()).toBe(1);
+      assert.strictEqual(lettersCountedMap.count(), 1);
 
       const lettersSetCursor = moment.getCursor('letters-set');
-      expect(lettersSetCursor).not.toBeNull();
+      assert.notStrictEqual(lettersSetCursor, null);
       const lettersSet = new ReadHashSet(lettersSetCursor!);
-      expect(lettersSet.getCursor('a')).not.toBeNull();
-      expect(lettersSet.getCursor('c')).toBeNull();
+      assert.notStrictEqual(lettersSet.getCursor('a'), null);
+      assert.strictEqual(lettersSet.getCursor('c'), null);
 
       const lettersCountedSetCursor = moment.getCursor('letters-counted-set');
-      expect(lettersCountedSetCursor).not.toBeNull();
+      assert.notStrictEqual(lettersCountedSetCursor, null);
       const lettersCountedSet = new ReadCountedHashSet(lettersCountedSetCursor!);
-      expect(lettersCountedSet.count()).toBe(1);
+      assert.strictEqual(lettersCountedSet.count(), 1);
     }
   });
 });
@@ -378,35 +376,35 @@ function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null): 
 
     const fooCursor = moment.getCursor('foo');
     const fooValue = fooCursor!.readBytes(MAX_READ_BYTES);
-    expect(new TextDecoder().decode(fooValue)).toBe('foo');
+    assert.strictEqual(new TextDecoder().decode(fooValue), 'foo');
 
-    expect((moment.getSlot('foo'))?.tag).toBe(Tag.SHORT_BYTES);
-    expect((moment.getSlot('bar'))?.tag).toBe(Tag.SHORT_BYTES);
+    assert.strictEqual((moment.getSlot('foo'))?.tag, Tag.SHORT_BYTES);
+    assert.strictEqual((moment.getSlot('bar'))?.tag, Tag.SHORT_BYTES);
 
     const fruitsCursor = moment.getCursor('fruits');
     const fruits = new ReadArrayList(fruitsCursor!);
-    expect(fruits.count()).toBe(3);
+    assert.strictEqual(fruits.count(), 3);
 
     const appleCursor = fruits.getCursor(0);
     const appleValue = appleCursor!.readBytes(MAX_READ_BYTES);
-    expect(new TextDecoder().decode(appleValue)).toBe('apple');
+    assert.strictEqual(new TextDecoder().decode(appleValue), 'apple');
 
     const peopleCursor = moment.getCursor('people');
     const people = new ReadArrayList(peopleCursor!);
-    expect(people.count()).toBe(2);
+    assert.strictEqual(people.count(), 2);
 
     const aliceCursor = people.getCursor(0);
     const alice = new ReadHashMap(aliceCursor!);
     const aliceAgeCursor = alice.getCursor('age');
-    expect(aliceAgeCursor!.readUint()).toBe(25);
+    assert.strictEqual(aliceAgeCursor!.readUint(), 25);
 
     const todosCursor = moment.getCursor('todos');
     const todos = new ReadLinkedArrayList(todosCursor!);
-    expect(todos.count()).toBe(3);
+    assert.strictEqual(todos.count(), 3);
 
     const todoCursor = todos.getCursor(0);
     const todoValue = todoCursor!.readBytes(MAX_READ_BYTES);
-    expect(new TextDecoder().decode(todoValue)).toBe('Pay the bills');
+    assert.strictEqual(new TextDecoder().decode(todoValue), 'Pay the bills');
 
     // iterate over people
     const peopleIter = people.iterator();
@@ -447,7 +445,7 @@ function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null): 
     {
       const lettersCountedMapCursor = moment.getCursor('letters-counted-map');
       const lettersCountedMap = new ReadCountedHashMap(lettersCountedMapCursor!);
-      expect(lettersCountedMap.count()).toBe(2);
+      assert.strictEqual(lettersCountedMap.count(), 2);
 
       const iter = lettersCountedMap.iterator();
       let count = 0;
@@ -457,15 +455,15 @@ function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null): 
         kvPair.keyCursor.readBytes(MAX_READ_BYTES);
         count += 1;
       }
-      expect(count).toBe(2);
+      assert.strictEqual(count, 2);
     }
 
     // Hash set
     {
       const lettersSetCursor = moment.getCursor('letters-set');
       const lettersSet = new ReadHashSet(lettersSetCursor!);
-      expect(lettersSet.getCursor('a')).not.toBeNull();
-      expect(lettersSet.getCursor('c')).not.toBeNull();
+      assert.notStrictEqual(lettersSet.getCursor('a'), null);
+      assert.notStrictEqual(lettersSet.getCursor('c'), null);
 
       const iter = lettersSet.iterator();
       let count = 0;
@@ -475,14 +473,14 @@ function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null): 
         kvPair.keyCursor.readBytes(MAX_READ_BYTES);
         count += 1;
       }
-      expect(count).toBe(2);
+      assert.strictEqual(count, 2);
     }
 
     // Counted hash set
     {
       const lettersCountedSetCursor = moment.getCursor('letters-counted-set');
       const lettersCountedSet = new ReadCountedHashSet(lettersCountedSetCursor!);
-      expect(lettersCountedSet.count()).toBe(2);
+      assert.strictEqual(lettersCountedSet.count(), 2);
 
       const iter = lettersCountedSet.iterator();
       let count = 0;
@@ -492,16 +490,16 @@ function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null): 
         kvPair.keyCursor.readBytes(MAX_READ_BYTES);
         count += 1;
       }
-      expect(count).toBe(2);
+      assert.strictEqual(count, 2);
     }
 
     // big number with format tag
     {
       const bigNumberCursor = moment.getCursor('big-number');
       const bigNumber = bigNumberCursor!.readBytesObject(MAX_READ_BYTES);
-      expect(bigNumber.value.length).toBe(32);
-      expect(bigNumber.value[0]).toBe(42);
-      expect(new TextDecoder().decode(bigNumber.formatTag!)).toBe('bi');
+      assert.strictEqual(bigNumber.value.length, 32);
+      assert.strictEqual(bigNumber.value[0], 42);
+      assert.strictEqual(new TextDecoder().decode(bigNumber.formatTag!), 'bi');
     }
 
     // long text
@@ -517,7 +515,7 @@ function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null): 
         }
       }
       if (line.length > 0) lineCount++;
-      expect(lineCount).toBe(50);
+      assert.strictEqual(lineCount, 50);
     }
   }
 
@@ -527,8 +525,8 @@ function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null): 
     history.appendContext(history.getSlot(-1), (cursor) => {
       const moment = new WriteHashMap(cursor);
 
-      expect(moment.remove('bar')).toBe(true);
-      expect(moment.remove("doesn't exist")).toBe(false);
+      assert.strictEqual(moment.remove('bar'), true);
+      assert.strictEqual(moment.remove("doesn't exist"), false);
 
       const fruitsCursor = moment.putCursor('fruits');
       const fruits = new WriteArrayList(fruitsCursor);
@@ -567,53 +565,53 @@ function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null): 
     const momentCursor = history.getCursor(-1);
     const moment = new ReadHashMap(momentCursor!);
 
-    expect(moment.getCursor('bar')).toBeNull();
+    assert.strictEqual(moment.getCursor('bar'), null);
 
     const fruitsKeyCursor = moment.getKeyCursor('fruits');
     const fruitsKeyValue = fruitsKeyCursor!.readBytes(MAX_READ_BYTES);
-    expect(new TextDecoder().decode(fruitsKeyValue)).toBe('fruits');
+    assert.strictEqual(new TextDecoder().decode(fruitsKeyValue), 'fruits');
 
     const fruitsCursor = moment.getCursor('fruits');
     const fruits = new ReadArrayList(fruitsCursor!);
-    expect(fruits.count()).toBe(2);
+    assert.strictEqual(fruits.count(), 2);
 
     const fruitsKVCursor = moment.getKeyValuePair('fruits');
-    expect(fruitsKVCursor!.keyCursor.slotPtr.slot.tag).toBe(Tag.SHORT_BYTES);
-    expect(fruitsKVCursor!.valueCursor.slotPtr.slot.tag).toBe(Tag.ARRAY_LIST);
+    assert.strictEqual(fruitsKVCursor!.keyCursor.slotPtr.slot.tag, Tag.SHORT_BYTES);
+    assert.strictEqual(fruitsKVCursor!.valueCursor.slotPtr.slot.tag, Tag.ARRAY_LIST);
 
     const lemonCursor = fruits.getCursor(0);
     const lemonValue = lemonCursor!.readBytes(MAX_READ_BYTES);
-    expect(new TextDecoder().decode(lemonValue)).toBe('lemon');
+    assert.strictEqual(new TextDecoder().decode(lemonValue), 'lemon');
 
     const peopleCursor = moment.getCursor('people');
     const people = new ReadArrayList(peopleCursor!);
-    expect(people.count()).toBe(2);
+    assert.strictEqual(people.count(), 2);
 
     const aliceCursor = people.getCursor(0);
     const alice = new ReadHashMap(aliceCursor!);
     const aliceAgeCursor = alice.getCursor('age');
-    expect(aliceAgeCursor!.readUint()).toBe(26);
+    assert.strictEqual(aliceAgeCursor!.readUint(), 26);
 
     const todosCursor = moment.getCursor('todos');
     const todos = new ReadLinkedArrayList(todosCursor!);
-    expect(todos.count()).toBe(1);
+    assert.strictEqual(todos.count(), 1);
 
     const todoCursor = todos.getCursor(0);
     const todoValue = todoCursor!.readBytes(MAX_READ_BYTES);
-    expect(new TextDecoder().decode(todoValue)).toBe('Wash the car');
+    assert.strictEqual(new TextDecoder().decode(todoValue), 'Wash the car');
 
     const lettersCountedMapCursor = moment.getCursor('letters-counted-map');
     const lettersCountedMap = new ReadCountedHashMap(lettersCountedMapCursor!);
-    expect(lettersCountedMap.count()).toBe(1);
+    assert.strictEqual(lettersCountedMap.count(), 1);
 
     const lettersSetCursor = moment.getCursor('letters-set');
     const lettersSet = new ReadHashSet(lettersSetCursor!);
-    expect(lettersSet.getCursor('a')).not.toBeNull();
-    expect(lettersSet.getCursor('c')).toBeNull();
+    assert.notStrictEqual(lettersSet.getCursor('a'), null);
+    assert.strictEqual(lettersSet.getCursor('c'), null);
 
     const lettersCountedSetCursor = moment.getCursor('letters-counted-set');
     const lettersCountedSet = new ReadCountedHashSet(lettersCountedSetCursor!);
-    expect(lettersCountedSet.count()).toBe(1);
+    assert.strictEqual(lettersCountedSet.count(), 1);
   }
 
   // The old data hasn't changed
@@ -624,35 +622,35 @@ function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null): 
 
     const fooCursor = moment.getCursor('foo');
     const fooValue = fooCursor!.readBytes(MAX_READ_BYTES);
-    expect(new TextDecoder().decode(fooValue)).toBe('foo');
+    assert.strictEqual(new TextDecoder().decode(fooValue), 'foo');
 
-    expect((moment.getSlot('foo'))?.tag).toBe(Tag.SHORT_BYTES);
-    expect((moment.getSlot('bar'))?.tag).toBe(Tag.SHORT_BYTES);
+    assert.strictEqual((moment.getSlot('foo'))?.tag, Tag.SHORT_BYTES);
+    assert.strictEqual((moment.getSlot('bar'))?.tag, Tag.SHORT_BYTES);
 
     const fruitsCursor = moment.getCursor('fruits');
     const fruits = new ReadArrayList(fruitsCursor!);
-    expect(fruits.count()).toBe(3);
+    assert.strictEqual(fruits.count(), 3);
 
     const appleCursor = fruits.getCursor(0);
     const appleValue = appleCursor!.readBytes(MAX_READ_BYTES);
-    expect(new TextDecoder().decode(appleValue)).toBe('apple');
+    assert.strictEqual(new TextDecoder().decode(appleValue), 'apple');
 
     const peopleCursor = moment.getCursor('people');
     const people = new ReadArrayList(peopleCursor!);
-    expect(people.count()).toBe(2);
+    assert.strictEqual(people.count(), 2);
 
     const aliceCursor = people.getCursor(0);
     const alice = new ReadHashMap(aliceCursor!);
     const aliceAgeCursor = alice.getCursor('age');
-    expect(aliceAgeCursor!.readUint()).toBe(25);
+    assert.strictEqual(aliceAgeCursor!.readUint(), 25);
 
     const todosCursor = moment.getCursor('todos');
     const todos = new ReadLinkedArrayList(todosCursor!);
-    expect(todos.count()).toBe(3);
+    assert.strictEqual(todos.count(), 3);
 
     const todoCursor = todos.getCursor(0);
     const todoValue = todoCursor!.readBytes(MAX_READ_BYTES);
-    expect(new TextDecoder().decode(todoValue)).toBe('Pay the bills');
+    assert.strictEqual(new TextDecoder().decode(todoValue), 'Pay the bills');
   }
 
   // Remove the last transaction with slice
@@ -665,35 +663,35 @@ function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null): 
 
     const fooCursor = moment.getCursor('foo');
     const fooValue = fooCursor!.readBytes(MAX_READ_BYTES);
-    expect(new TextDecoder().decode(fooValue)).toBe('foo');
+    assert.strictEqual(new TextDecoder().decode(fooValue), 'foo');
 
-    expect((moment.getSlot('foo'))?.tag).toBe(Tag.SHORT_BYTES);
-    expect((moment.getSlot('bar'))?.tag).toBe(Tag.SHORT_BYTES);
+    assert.strictEqual((moment.getSlot('foo'))?.tag, Tag.SHORT_BYTES);
+    assert.strictEqual((moment.getSlot('bar'))?.tag, Tag.SHORT_BYTES);
 
     const fruitsCursor = moment.getCursor('fruits');
     const fruits = new ReadArrayList(fruitsCursor!);
-    expect(fruits.count()).toBe(3);
+    assert.strictEqual(fruits.count(), 3);
 
     const appleCursor = fruits.getCursor(0);
     const appleValue = appleCursor!.readBytes(MAX_READ_BYTES);
-    expect(new TextDecoder().decode(appleValue)).toBe('apple');
+    assert.strictEqual(new TextDecoder().decode(appleValue), 'apple');
 
     const peopleCursor = moment.getCursor('people');
     const people = new ReadArrayList(peopleCursor!);
-    expect(people.count()).toBe(2);
+    assert.strictEqual(people.count(), 2);
 
     const aliceCursor = people.getCursor(0);
     const alice = new ReadHashMap(aliceCursor!);
     const aliceAgeCursor = alice.getCursor('age');
-    expect(aliceAgeCursor!.readUint()).toBe(25);
+    assert.strictEqual(aliceAgeCursor!.readUint(), 25);
 
     const todosCursor = moment.getCursor('todos');
     const todos = new ReadLinkedArrayList(todosCursor!);
-    expect(todos.count()).toBe(3);
+    assert.strictEqual(todos.count(), 3);
 
     const todoCursor = todos.getCursor(0);
     const todoValue = todoCursor!.readBytes(MAX_READ_BYTES);
-    expect(new TextDecoder().decode(todoValue)).toBe('Pay the bills');
+    assert.strictEqual(new TextDecoder().decode(todoValue), 'Pay the bills');
   }
 
   // The db size remains the same after writing junk data and then reinitializing the db
@@ -707,7 +705,7 @@ function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null): 
     db = new Database(core, hasher);
 
     const sizeAfter = core.length();
-    expect(sizeBefore).toBe(sizeAfter);
+    assert.strictEqual(sizeBefore, sizeAfter);
   }
 
   // Cloning
@@ -735,12 +733,12 @@ function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null): 
     // the food list includes the fruits
     const foodCursor = moment.getCursor('food');
     const food = new ReadArrayList(foodCursor!);
-    expect(food.count()).toBe(6);
+    assert.strictEqual(food.count(), 6);
 
     // ...but the fruits list hasn't been changed
     const fruitsCursor = moment.getCursor('fruits');
     const fruits = new ReadArrayList(fruitsCursor!);
-    expect(fruits.count()).toBe(3);
+    assert.strictEqual(fruits.count(), 3);
   }
 
   // Accidental mutation when cloning inside a transaction
@@ -771,12 +769,12 @@ function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null): 
     // the cities list contains all four
     const citiesCursor = moment.getCursor('cities');
     const cities = new ReadArrayList(citiesCursor!);
-    expect(cities.count()).toBe(4);
+    assert.strictEqual(cities.count(), 4);
 
     // ..but so does big-cities! we did not intend to mutate this
     const bigCitiesCursor = moment.getCursor('big-cities');
     const bigCities = new ReadArrayList(bigCitiesCursor!);
-    expect(bigCities.count()).toBe(4);
+    assert.strictEqual(bigCities.count(), 4);
 
     // revert that change
     history.append((history.getSlot(historyIndex))!);
@@ -811,12 +809,12 @@ function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null): 
     // the cities list contains all four
     const citiesCursor = moment.getCursor('cities');
     const cities = new ReadArrayList(citiesCursor!);
-    expect(cities.count()).toBe(4);
+    assert.strictEqual(cities.count(), 4);
 
     // and big-cities only contains the original two
     const bigCitiesCursor = moment.getCursor('big-cities');
     const bigCities = new ReadArrayList(bigCitiesCursor!);
-    expect(bigCities.count()).toBe(2);
+    assert.strictEqual(bigCities.count(), 2);
   }
 }
 
@@ -885,7 +883,7 @@ function testCompaction(
     targetCore.setLength(0);
     const source = new Database(sourceCore, hasher);
     const compacted = source.compact(targetCore);
-    expect(compacted.header.tag).toBe(Tag.NONE);
+    assert.strictEqual(compacted.header.tag, Tag.NONE);
   }
 
   // basic compaction with various data types
@@ -974,67 +972,67 @@ function testCompaction(
     const targetSize = targetCore.length();
 
     // target should be smaller than source (3 moments vs 1)
-    expect(targetSize).toBeLessThan(sourceSize);
+    assert.ok((targetSize) < (sourceSize));
 
     // target should have exactly 1 moment
     const history = new ReadArrayList(compacted.rootCursor());
-    expect(history.count()).toBe(1);
+    assert.strictEqual(history.count(), 1);
 
     // verify all data from latest moment is correct
     const momentCursor = history.getCursor(0);
     const moment = new ReadHashMap(momentCursor!);
 
     // key1 should have the final value
-    expect(decoder.decode((moment.getCursor('key1'))!.readBytes(MAX_READ_BYTES))).toBe('final_value');
+    assert.strictEqual(decoder.decode((moment.getCursor('key1'))!.readBytes(MAX_READ_BYTES)), 'final_value');
 
     // key2 from moment 2
-    expect((moment.getCursor('key2'))!.readUint()).toBe(200);
+    assert.strictEqual((moment.getCursor('key2'))!.readUint(), 200);
 
     // key3 - int
-    expect((moment.getCursor('key3'))!.readInt()).toBe(-42);
+    assert.strictEqual((moment.getCursor('key3'))!.readInt(), -42);
 
     // key4 - float
-    expect((moment.getCursor('key4'))!.readFloat()).toBe(3.14);
+    assert.strictEqual((moment.getCursor('key4'))!.readFloat(), 3.14);
 
     // short bytes
-    expect(decoder.decode((moment.getCursor('short'))!.readBytes(MAX_READ_BYTES))).toBe('hi');
+    assert.strictEqual(decoder.decode((moment.getCursor('short'))!.readBytes(MAX_READ_BYTES)), 'hi');
 
     // tagged bytes
     const taggedObj = (moment.getCursor('tagged'))!.readBytesObject(MAX_READ_BYTES);
-    expect(decoder.decode(taggedObj.value)).toBe('this is a long tagged string!!');
-    expect(decoder.decode(taggedObj.formatTag!)).toBe('bi');
+    assert.strictEqual(decoder.decode(taggedObj.value), 'this is a long tagged string!!');
+    assert.strictEqual(decoder.decode(taggedObj.formatTag!), 'bi');
 
     // ArrayList
     const fruitsCursor = moment.getCursor('fruits');
     const fruits = new ReadArrayList(fruitsCursor!);
-    expect(fruits.count()).toBe(3);
-    expect(decoder.decode((fruits.getCursor(0))!.readBytes(MAX_READ_BYTES))).toBe('apple');
-    expect(decoder.decode((fruits.getCursor(2))!.readBytes(MAX_READ_BYTES))).toBe('cherry');
+    assert.strictEqual(fruits.count(), 3);
+    assert.strictEqual(decoder.decode((fruits.getCursor(0))!.readBytes(MAX_READ_BYTES)), 'apple');
+    assert.strictEqual(decoder.decode((fruits.getCursor(2))!.readBytes(MAX_READ_BYTES)), 'cherry');
 
     // LinkedArrayList
     const todosCursor = moment.getCursor('todos');
     const todos = new ReadLinkedArrayList(todosCursor!);
-    expect(todos.count()).toBe(3);
-    expect(decoder.decode((todos.getCursor(0))!.readBytes(MAX_READ_BYTES))).toBe('task1');
-    expect(decoder.decode((todos.getCursor(2))!.readBytes(MAX_READ_BYTES))).toBe('task3');
+    assert.strictEqual(todos.count(), 3);
+    assert.strictEqual(decoder.decode((todos.getCursor(0))!.readBytes(MAX_READ_BYTES)), 'task1');
+    assert.strictEqual(decoder.decode((todos.getCursor(2))!.readBytes(MAX_READ_BYTES)), 'task3');
 
     // CountedHashMap
     const countedCursor = moment.getCursor('counted');
     const counted = new ReadCountedHashMap(countedCursor!);
-    expect(counted.count()).toBe(2);
-    expect((counted.getCursor('a'))!.readUint()).toBe(1);
-    expect((counted.getCursor('b'))!.readUint()).toBe(2);
+    assert.strictEqual(counted.count(), 2);
+    assert.strictEqual((counted.getCursor('a'))!.readUint(), 1);
+    assert.strictEqual((counted.getCursor('b'))!.readUint(), 2);
 
     // HashSet
     const setCursor = moment.getCursor('myset');
     const set = new ReadHashSet(setCursor!);
-    expect(decoder.decode((set.getCursor('x'))!.readBytes(MAX_READ_BYTES))).toBe('x');
+    assert.strictEqual(decoder.decode((set.getCursor('x'))!.readBytes(MAX_READ_BYTES)), 'x');
 
     // CountedHashSet
     const csetCursor = moment.getCursor('mycset');
     const cset = new ReadCountedHashSet(csetCursor!);
-    expect(cset.count()).toBe(2);
-    expect(decoder.decode((cset.getCursor('p'))!.readBytes(MAX_READ_BYTES))).toBe('p');
+    assert.strictEqual(cset.count(), 2);
+    assert.strictEqual(decoder.decode((cset.getCursor('p'))!.readBytes(MAX_READ_BYTES)), 'p');
   }
 
   // structural sharing (most data shared, only 1 key changes per moment)
@@ -1066,18 +1064,18 @@ function testCompaction(
     const compacted = source.compact(targetCore);
 
     const history = new ReadArrayList(compacted.rootCursor());
-    expect(history.count()).toBe(1);
+    assert.strictEqual(history.count(), 1);
 
     const momentCursor = history.getCursor(0);
     const moment = new ReadHashMap(momentCursor!);
 
     // verify shared keys are intact
     for (let i = 0; i < 20; i++) {
-      expect((moment.getCursor(`shared_key_${i}`))!.readUint()).toBe(i);
+      assert.strictEqual((moment.getCursor(`shared_key_${i}`))!.readUint(), i);
     }
 
     // verify changing key has latest value
-    expect((moment.getCursor('changing_key'))!.readUint()).toBe(103);
+    assert.strictEqual((moment.getCursor('changing_key'))!.readUint(), 103);
   }
 
   // re-open after compact and compact-then-continue-writing
@@ -1107,12 +1105,12 @@ function testCompaction(
       const reopened = new Database(targetCore, hasher);
 
       const history = new ReadArrayList(reopened.rootCursor());
-      expect(history.count()).toBe(1);
+      assert.strictEqual(history.count(), 1);
 
       const momentCursor = history.getCursor(0);
       const moment = new ReadHashMap(momentCursor!);
-      expect(decoder.decode((moment.getCursor('persist'))!.readBytes(MAX_READ_BYTES))).toBe('persistent_value');
-      expect((moment.getCursor('number'))!.readUint()).toBe(999);
+      assert.strictEqual(decoder.decode((moment.getCursor('persist'))!.readBytes(MAX_READ_BYTES)), 'persistent_value');
+      assert.strictEqual((moment.getCursor('number'))!.readUint(), 999);
     }
 
     // compact then continue writing
@@ -1144,20 +1142,20 @@ function testCompaction(
 
       // verify both old and new data
       const history = new ReadArrayList(compacted.rootCursor());
-      expect(history.count()).toBe(2);
+      assert.strictEqual(history.count(), 2);
 
       // moment 0 (compacted original)
       const m0Cursor = history.getCursor(0);
       const m0 = new ReadHashMap(m0Cursor!);
-      expect(decoder.decode((m0.getCursor('original'))!.readBytes(MAX_READ_BYTES))).toBe('original_data');
+      assert.strictEqual(decoder.decode((m0.getCursor('original'))!.readBytes(MAX_READ_BYTES)), 'original_data');
 
       // moment 1 (new data added after compact)
       const m1Cursor = history.getCursor(1);
       const m1 = new ReadHashMap(m1Cursor!);
-      expect(decoder.decode((m1.getCursor('new_key'))!.readBytes(MAX_READ_BYTES))).toBe('new_data');
+      assert.strictEqual(decoder.decode((m1.getCursor('new_key'))!.readBytes(MAX_READ_BYTES)), 'new_data');
 
       // original data should still be in moment 1 (inherited)
-      expect(decoder.decode((m1.getCursor('original'))!.readBytes(MAX_READ_BYTES))).toBe('original_data');
+      assert.strictEqual(decoder.decode((m1.getCursor('original'))!.readBytes(MAX_READ_BYTES)), 'original_data');
     }
   }
 }

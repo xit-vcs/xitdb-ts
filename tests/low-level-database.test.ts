@@ -1,5 +1,5 @@
 import { test, describe } from 'node:test';
-import { expect } from './expect.ts';
+import assert from 'node:assert/strict';
 import {
   Database,
   Tag,
@@ -96,7 +96,7 @@ describe('Low Level API', () => {
     const reader = textCursor.reader();
     const allBytes = new Uint8Array(Number(textCursor.count()));
     reader.readFully(allBytes);
-    expect(new TextDecoder().decode(allBytes)).toBe('goodbye, cruel world!');
+    assert.strictEqual(new TextDecoder().decode(allBytes), 'goodbye, cruel world!');
   });
 });
 
@@ -114,7 +114,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
     writer.writeByte('g'.charCodeAt(0));
 
     // re-open with error
-    expect(() => new Database(core, hasher)).toThrow(InvalidDatabaseException);
+    assert.throws(() => new Database(core, hasher), InvalidDatabaseException);
 
     // modify the version
     db.core.seek(0);
@@ -123,7 +123,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
     writer.writeShort(VERSION + 1);
 
     // re-open with error
-    expect(() => new Database(core, hasher)).toThrow(InvalidVersionException);
+    assert.throws(() => new Database(core, hasher), InvalidVersionException);
   }
 
   // save hash id in header
@@ -136,8 +136,8 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
     const db = new Database(core, hasherWithHashId);
 
     // verify hash id was stored
-    expect(db.hasher.id).toBe(hashId);
-    expect(Hasher.idToString(db.hasher.id)).toBe('sha1');
+    assert.strictEqual(db.hasher.id, hashId);
+    assert.strictEqual(Hasher.idToString(db.hasher.id), 'sha1');
   }
 
   // array_list of hash_maps
@@ -155,7 +155,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
       new HashMapInit(false, false),
       new HashMapGet(new HashMapGetValue(fooKey)),
       new Context((cursor) => {
-        expect(cursor.slot().tag).toBe(Tag.NONE);
+        assert.strictEqual(cursor.slot().tag, Tag.NONE);
         const writer = cursor.writer();
         writer.write(new TextEncoder().encode('bar'));
         writer.finish();
@@ -168,9 +168,9 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         new ArrayListGet(-1),
         new HashMapGet(new HashMapGetValue(fooKey)),
       ]);
-      expect(barCursor!.count()).toBe(3);
+      assert.strictEqual(barCursor!.count(), 3);
       const barValue = barCursor!.readBytes(MAX_READ_BYTES);
-      expect(new TextDecoder().decode(barValue)).toBe('bar');
+      assert.strictEqual(new TextDecoder().decode(barValue), 'bar');
     }
 
     // read foo from ctx
@@ -181,20 +181,20 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
       new HashMapInit(false, false),
       new HashMapGet(new HashMapGetValue(fooKey)),
       new Context((cursor) => {
-        expect(cursor.slot().tag).not.toBe(Tag.NONE);
+        assert.notStrictEqual(cursor.slot().tag, Tag.NONE);
 
         const value = cursor.readBytes(MAX_READ_BYTES);
-        expect(new TextDecoder().decode(value)).toBe('bar');
+        assert.strictEqual(new TextDecoder().decode(value), 'bar');
 
         const barReader = cursor.reader();
 
         // read into buffer
         const barBytes = new Uint8Array(10);
         const barSize = barReader.read(barBytes);
-        expect(new TextDecoder().decode(barBytes.slice(0, barSize))).toBe('bar');
+        assert.strictEqual(new TextDecoder().decode(barBytes.slice(0, barSize)), 'bar');
         barReader.seek(0);
-        expect(barReader.read(barBytes)).toBe(3);
-        expect(new TextDecoder().decode(barBytes.slice(0, 3))).toBe('bar');
+        assert.strictEqual(barReader.read(barBytes), 3);
+        assert.strictEqual(new TextDecoder().decode(barBytes.slice(0, 3)), 'bar');
 
         // read one char at a time
         {
@@ -202,21 +202,21 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
           barReader.seek(0);
 
           barReader.readFully(ch);
-          expect(new TextDecoder().decode(ch)).toBe('b');
+          assert.strictEqual(new TextDecoder().decode(ch), 'b');
 
           barReader.readFully(ch);
-          expect(new TextDecoder().decode(ch)).toBe('a');
+          assert.strictEqual(new TextDecoder().decode(ch), 'a');
 
           barReader.readFully(ch);
-          expect(new TextDecoder().decode(ch)).toBe('r');
+          assert.strictEqual(new TextDecoder().decode(ch), 'r');
 
-          expect(() => barReader.readFully(ch)).toThrow(EndOfStreamException);
+          assert.throws(() => barReader.readFully(ch), EndOfStreamException);
 
           barReader.seek(1);
-          expect(String.fromCharCode(barReader.readByte())).toBe('a');
+          assert.strictEqual(String.fromCharCode(barReader.readByte()), 'a');
 
           barReader.seek(0);
-          expect(String.fromCharCode(barReader.readByte())).toBe('b');
+          assert.strictEqual(String.fromCharCode(barReader.readByte()), 'b');
         }
       }),
     ]);
@@ -229,7 +229,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
       new HashMapInit(false, false),
       new HashMapGet(new HashMapGetValue(fooKey)),
       new Context((cursor) => {
-        expect(cursor.slot().tag).not.toBe(Tag.NONE);
+        assert.notStrictEqual(cursor.slot().tag, Tag.NONE);
 
         const writer = cursor.writer();
         writer.write(new TextEncoder().encode('x'));
@@ -244,7 +244,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         writer.finish();
 
         const value = cursor.readBytes(MAX_READ_BYTES);
-        expect(new TextDecoder().decode(value)).toBe('baz');
+        assert.strictEqual(new TextDecoder().decode(value), 'baz');
       }),
     ]);
 
@@ -274,11 +274,11 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         new HashMapGet(new HashMapGetValue(fooKey)),
       ]);
       const value = valueCursor!.readBytes();
-      expect(new TextDecoder().decode(value)).toBe('baz');
+      assert.strictEqual(new TextDecoder().decode(value), 'baz');
 
       // verify that the db is properly truncated back to its original size after error
       const sizeAfter = core.length();
-      expect(sizeBefore).toBe(sizeAfter);
+      assert.strictEqual(sizeBefore, sizeAfter);
     }
 
     // write bar -> longstring
@@ -294,7 +294,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
       barCursor.write(new Bytes('longstring'));
 
       // the slot tag is BYTES because the byte array is > 8 bytes long
-      expect(barCursor.slot().tag).toBe(Tag.BYTES);
+      assert.strictEqual(barCursor.slot().tag, Tag.BYTES);
 
       // writing again returns the same slot
       {
@@ -306,7 +306,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
           new HashMapGet(new HashMapGetValue(barKey)),
         ]);
         nextBarCursor.writeIfEmpty(new Bytes('longstring'));
-        expect(barCursor.slot().value).toBe(nextBarCursor.slot().value);
+        assert.strictEqual(barCursor.slot().value, nextBarCursor.slot().value);
       }
 
       // writing with write returns a new slot
@@ -319,7 +319,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
           new HashMapGet(new HashMapGetValue(barKey)),
         ]);
         nextBarCursor.write(new Bytes('longstring'));
-        expect(barCursor.slot().value).not.toBe(nextBarCursor.slot().value);
+        assert.notStrictEqual(barCursor.slot().value, nextBarCursor.slot().value);
       }
     }
 
@@ -330,7 +330,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         new HashMapGet(new HashMapGetValue(barKey)),
       ]);
       const barValue = readBarCursor!.readBytes(MAX_READ_BYTES);
-      expect(new TextDecoder().decode(barValue)).toBe('longstring');
+      assert.strictEqual(new TextDecoder().decode(barValue), 'longstring');
     }
 
     // write bar -> shortstr
@@ -345,14 +345,14 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
       barCursor.write(new Bytes('shortstr'));
 
       // the slot tag is SHORT_BYTES because the byte array is <= 8 bytes long
-      expect(barCursor.slot().tag).toBe(Tag.SHORT_BYTES);
-      expect(barCursor.count()).toBe(8);
+      assert.strictEqual(barCursor.slot().tag, Tag.SHORT_BYTES);
+      assert.strictEqual(barCursor.count(), 8);
 
       // make sure that SHORT_BYTES can be read with a reader
       const barReader = barCursor.reader();
       const barValue = new Uint8Array(Number(barCursor.count()));
       barReader.readFully(barValue);
-      expect(new TextDecoder().decode(barValue)).toBe('shortstr');
+      assert.strictEqual(new TextDecoder().decode(barValue), 'shortstr');
     }
 
     // write bytes with a format tag - shortstr
@@ -367,8 +367,8 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
       barCursor.write(new Bytes('shortstr', new TextEncoder().encode('st')));
 
       // the slot tag is BYTES because the byte array is > 8 bytes long including the format tag
-      expect(barCursor.slot().tag).toBe(Tag.BYTES);
-      expect(barCursor.count()).toBe(8);
+      assert.strictEqual(barCursor.slot().tag, Tag.BYTES);
+      assert.strictEqual(barCursor.count(), 8);
 
       // read bar
       const readBarCursor = rootCursor.readPath([
@@ -376,14 +376,14 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         new HashMapGet(new HashMapGetValue(barKey)),
       ]);
       const barBytes = readBarCursor!.readBytesObject(MAX_READ_BYTES);
-      expect(new TextDecoder().decode(barBytes.value)).toBe('shortstr');
-      expect(new TextDecoder().decode(barBytes.formatTag!)).toBe('st');
+      assert.strictEqual(new TextDecoder().decode(barBytes.value), 'shortstr');
+      assert.strictEqual(new TextDecoder().decode(barBytes.formatTag!), 'st');
 
       // make sure that BYTES can be read with a reader
       const barReader = barCursor.reader();
       const barValue = new Uint8Array(Number(barCursor.count()));
       barReader.readFully(barValue);
-      expect(new TextDecoder().decode(barValue)).toBe('shortstr');
+      assert.strictEqual(new TextDecoder().decode(barValue), 'shortstr');
     }
 
     // write bytes with a format tag - shorts
@@ -398,8 +398,8 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
       barCursor.write(new Bytes('shorts', new TextEncoder().encode('st')));
 
       // the slot tag is SHORT_BYTES because the byte array is <= 8 bytes long including the format tag
-      expect(barCursor.slot().tag).toBe(Tag.SHORT_BYTES);
-      expect(barCursor.count()).toBe(6);
+      assert.strictEqual(barCursor.slot().tag, Tag.SHORT_BYTES);
+      assert.strictEqual(barCursor.count(), 6);
 
       // read bar
       const readBarCursor = rootCursor.readPath([
@@ -407,14 +407,14 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         new HashMapGet(new HashMapGetValue(barKey)),
       ]);
       const barBytes = readBarCursor!.readBytesObject(MAX_READ_BYTES);
-      expect(new TextDecoder().decode(barBytes.value)).toBe('shorts');
-      expect(new TextDecoder().decode(barBytes.formatTag!)).toBe('st');
+      assert.strictEqual(new TextDecoder().decode(barBytes.value), 'shorts');
+      assert.strictEqual(new TextDecoder().decode(barBytes.formatTag!), 'st');
 
       // make sure that SHORT_BYTES can be read with a reader
       const barReader = barCursor.reader();
       const barValue = new Uint8Array(Number(barCursor.count()));
       barReader.readFully(barValue);
-      expect(new TextDecoder().decode(barValue)).toBe('shorts');
+      assert.strictEqual(new TextDecoder().decode(barValue), 'shorts');
     }
 
     // write bytes with a format tag - short
@@ -429,8 +429,8 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
       barCursor.write(new Bytes('short', new TextEncoder().encode('st')));
 
       // the slot tag is SHORT_BYTES because the byte array is <= 8 bytes long including the format tag
-      expect(barCursor.slot().tag).toBe(Tag.SHORT_BYTES);
-      expect(barCursor.count()).toBe(5);
+      assert.strictEqual(barCursor.slot().tag, Tag.SHORT_BYTES);
+      assert.strictEqual(barCursor.count(), 5);
 
       // read bar
       const readBarCursor = rootCursor.readPath([
@@ -438,14 +438,14 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         new HashMapGet(new HashMapGetValue(barKey)),
       ]);
       const barBytes = readBarCursor!.readBytesObject(MAX_READ_BYTES);
-      expect(new TextDecoder().decode(barBytes.value)).toBe('short');
-      expect(new TextDecoder().decode(barBytes.formatTag!)).toBe('st');
+      assert.strictEqual(new TextDecoder().decode(barBytes.value), 'short');
+      assert.strictEqual(new TextDecoder().decode(barBytes.formatTag!), 'st');
 
       // make sure that SHORT_BYTES can be read with a reader
       const barReader = barCursor.reader();
       const barValue = new Uint8Array(Number(barCursor.count()));
       barReader.readFully(barValue);
-      expect(new TextDecoder().decode(barValue)).toBe('short');
+      assert.strictEqual(new TextDecoder().decode(barValue), 'short');
     }
 
     // read foo into buffer
@@ -455,7 +455,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         new HashMapGet(new HashMapGetValue(fooKey)),
       ]);
       const barBufferValue = barCursor!.readBytes(MAX_READ_BYTES);
-      expect(new TextDecoder().decode(barBufferValue)).toBe('baz');
+      assert.strictEqual(new TextDecoder().decode(barBufferValue), 'baz');
     }
 
     // write bar and get a pointer to it
@@ -484,7 +484,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
       new HashMapGet(new HashMapGetValue(fooKey)),
     ]);
     const barValue = barCursor!.readBytes(MAX_READ_BYTES);
-    expect(new TextDecoder().decode(barValue)).toBe('bar');
+    assert.strictEqual(new TextDecoder().decode(barValue), 'bar');
 
     // can still read the old value
     const bazCursor = rootCursor.readPath([
@@ -492,13 +492,13 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
       new HashMapGet(new HashMapGetValue(fooKey)),
     ]);
     const bazValue = bazCursor!.readBytes(MAX_READ_BYTES);
-    expect(new TextDecoder().decode(bazValue)).toBe('baz');
+    assert.strictEqual(new TextDecoder().decode(bazValue), 'baz');
 
     // key not found
     const notFoundKey = db.hasher.digest(new TextEncoder().encode("this doesn't exist"));
-    expect(
+    assert.strictEqual(
       rootCursor.readPath([new ArrayListGet(-2), new HashMapGet(new HashMapGetValue(notFoundKey))])
-    ).toBeNull();
+    , null);
 
     // write key that conflicts with foo the first two bytes
     const smallConflictKey = db.hasher.digest(new TextEncoder().encode('small conflict'));
@@ -534,7 +534,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
       new HashMapGet(new HashMapGetValue(conflictKey)),
     ]);
     const helloValue = helloCursor!.readBytes(MAX_READ_BYTES);
-    expect(new TextDecoder().decode(helloValue)).toBe('hello');
+    assert.strictEqual(new TextDecoder().decode(helloValue), 'hello');
 
     // we can still read foo
     const barCursor2 = rootCursor.readPath([
@@ -542,7 +542,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
       new HashMapGet(new HashMapGetValue(fooKey)),
     ]);
     const barValue2 = barCursor2!.readBytes(MAX_READ_BYTES);
-    expect(new TextDecoder().decode(barValue2)).toBe('bar');
+    assert.strictEqual(new TextDecoder().decode(barValue2), 'bar');
 
     // overwrite conflicting key
     rootCursor.writePath([
@@ -558,7 +558,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
       new HashMapGet(new HashMapGetValue(conflictKey)),
     ]);
     const goodbyeValue = goodbyeCursor!.readBytes(MAX_READ_BYTES);
-    expect(new TextDecoder().decode(goodbyeValue)).toBe('goodbye');
+    assert.strictEqual(new TextDecoder().decode(goodbyeValue), 'goodbye');
 
     // we can still read the old conflicting key
     const helloCursor2 = rootCursor.readPath([
@@ -566,14 +566,14 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
       new HashMapGet(new HashMapGetValue(conflictKey)),
     ]);
     const helloValue2 = helloCursor2!.readBytes(MAX_READ_BYTES);
-    expect(new TextDecoder().decode(helloValue2)).toBe('hello');
+    assert.strictEqual(new TextDecoder().decode(helloValue2), 'hello');
 
     // remove the conflicting keys
     {
       // foo's slot is an INDEX slot due to the conflict
       {
         const mapCursor = rootCursor.readPath([new ArrayListGet(-1)]);
-        expect(mapCursor!.slot().tag).toBe(Tag.HASH_MAP);
+        assert.strictEqual(mapCursor!.slot().tag, Tag.HASH_MAP);
 
         const i = Number(BigInt.asUintN(64, bytesToBigInt(fooKey)) & MASK);
         const slotPos = Number(mapCursor!.slot().value) + Slot.LENGTH * i;
@@ -583,7 +583,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         reader.readFully(slotBytes);
         const slot = Slot.fromBytes(slotBytes);
 
-        expect(slot.tag).toBe(Tag.INDEX);
+        assert.strictEqual(slot.tag, Tag.INDEX);
       }
 
       // remove the small conflict key
@@ -596,24 +596,24 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
       ]);
 
       // the conflict key still exists in history
-      expect(
+      assert.notStrictEqual(
         rootCursor.readPath([new ArrayListGet(-2), new HashMapGet(new HashMapGetValue(smallConflictKey))])
-      ).not.toBeNull();
+      , null);
 
       // the conflict key doesn't exist in the latest moment
-      expect(
+      assert.strictEqual(
         rootCursor.readPath([new ArrayListGet(-1), new HashMapGet(new HashMapGetValue(smallConflictKey))])
-      ).toBeNull();
+      , null);
 
       // the other conflict key still exists
-      expect(
+      assert.notStrictEqual(
         rootCursor.readPath([new ArrayListGet(-1), new HashMapGet(new HashMapGetValue(conflictKey))])
-      ).not.toBeNull();
+      , null);
 
       // foo's slot is still an INDEX slot due to the other conflicting key
       {
         const mapCursor = rootCursor.readPath([new ArrayListGet(-1)]);
-        expect(mapCursor!.slot().tag).toBe(Tag.HASH_MAP);
+        assert.strictEqual(mapCursor!.slot().tag, Tag.HASH_MAP);
 
         const i = Number(BigInt.asUintN(64, bytesToBigInt(fooKey)) & MASK);
         const slotPos = Number(mapCursor!.slot().value) + Slot.LENGTH * i;
@@ -623,7 +623,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         reader.readFully(slotBytes);
         const slot = Slot.fromBytes(slotBytes);
 
-        expect(slot.tag).toBe(Tag.INDEX);
+        assert.strictEqual(slot.tag, Tag.INDEX);
       }
 
       // remove the conflict key
@@ -636,17 +636,17 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
       ]);
 
       // the conflict keys don't exist in the latest moment
-      expect(
+      assert.strictEqual(
         rootCursor.readPath([new ArrayListGet(-1), new HashMapGet(new HashMapGetValue(smallConflictKey))])
-      ).toBeNull();
-      expect(
+      , null);
+      assert.strictEqual(
         rootCursor.readPath([new ArrayListGet(-1), new HashMapGet(new HashMapGetValue(conflictKey))])
-      ).toBeNull();
+      , null);
 
       // foo's slot is now a KV_PAIR slot, because the branch was shortened
       {
         const mapCursor = rootCursor.readPath([new ArrayListGet(-1)]);
-        expect(mapCursor!.slot().tag).toBe(Tag.HASH_MAP);
+        assert.strictEqual(mapCursor!.slot().tag, Tag.HASH_MAP);
 
         const i = Number(BigInt.asUintN(64, bytesToBigInt(fooKey)) & MASK);
         const slotPos = Number(mapCursor!.slot().value) + Slot.LENGTH * i;
@@ -656,7 +656,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         reader.readFully(slotBytes);
         const slot = Slot.fromBytes(slotBytes);
 
-        expect(slot.tag).toBe(Tag.KV_PAIR);
+        assert.strictEqual(slot.tag, Tag.KV_PAIR);
       }
     }
 
@@ -676,7 +676,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
       const uintValue = (
         rootCursor.readPath([new ArrayListGet(-1), new HashMapGet(new HashMapGetValue(fooKey))])
       )!.readUint();
-      expect(uintValue).toBe(42);
+      assert.strictEqual(uintValue, 42);
     }
 
     {
@@ -694,7 +694,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
       const intValue = (
         rootCursor.readPath([new ArrayListGet(-1), new HashMapGet(new HashMapGetValue(fooKey))])
       )!.readInt();
-      expect(intValue).toBe(-42);
+      assert.strictEqual(intValue, -42);
     }
 
     {
@@ -712,7 +712,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
       const floatValue = (
         rootCursor.readPath([new ArrayListGet(-1), new HashMapGet(new HashMapGetValue(fooKey))])
       )!.readFloat();
-      expect(floatValue).toBe(42.5);
+      assert.strictEqual(floatValue, 42.5);
     }
 
     // remove foo
@@ -725,7 +725,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
     ]);
 
     // remove key that does not exist
-    expect(() =>
+    assert.throws(() =>
       rootCursor.writePath([
         new ArrayListInit(),
         new ArrayListAppend(),
@@ -733,12 +733,12 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         new HashMapInit(false, false),
         new HashMapRemove(db.hasher.digest(new TextEncoder().encode("doesn't exist"))),
       ])
-    ).toThrow(KeyNotFoundException);
+    , KeyNotFoundException);
 
     // make sure foo doesn't exist anymore
-    expect(
+    assert.strictEqual(
       rootCursor.readPath([new ArrayListGet(-1), new HashMapGet(new HashMapGetValue(fooKey))])
-    ).toBeNull();
+    , null);
 
     // non-top-level list
     {
@@ -763,7 +763,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         new ArrayListGet(-1),
       ]);
       const appleValue = appleCursor!.readBytes(MAX_READ_BYTES);
-      expect(new TextDecoder().decode(appleValue)).toBe('apple');
+      assert.strictEqual(new TextDecoder().decode(appleValue), 'apple');
 
       // write banana
       rootCursor.writePath([
@@ -784,16 +784,16 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         new ArrayListGet(-1),
       ]);
       const bananaValue = bananaCursor!.readBytes(MAX_READ_BYTES);
-      expect(new TextDecoder().decode(bananaValue)).toBe('banana');
+      assert.strictEqual(new TextDecoder().decode(bananaValue), 'banana');
 
       // can't read banana in older array_list
-      expect(
+      assert.strictEqual(
         rootCursor.readPath([
           new ArrayListGet(-2),
           new HashMapGet(new HashMapGetValue(fruitsKey)),
           new ArrayListGet(1),
         ])
-      ).toBeNull();
+      , null);
 
       // write pear
       rootCursor.writePath([
@@ -826,7 +826,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         new ArrayListGet(-2),
       ]);
       const pearValue = pearCursor!.readBytes(MAX_READ_BYTES);
-      expect(new TextDecoder().decode(pearValue)).toBe('pear');
+      assert.strictEqual(new TextDecoder().decode(pearValue), 'pear');
 
       // read grape
       const grapeCursor = rootCursor.readPath([
@@ -835,7 +835,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         new ArrayListGet(-1),
       ]);
       const grapeValue = grapeCursor!.readBytes(MAX_READ_BYTES);
-      expect(new TextDecoder().decode(grapeValue)).toBe('grape');
+      assert.strictEqual(new TextDecoder().decode(grapeValue), 'grape');
     }
   }
 
@@ -867,7 +867,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         new HashMapGet(new HashMapGetValue(watKey)),
       ]);
       const value2 = new TextDecoder().decode(cursor!.readBytes(MAX_READ_BYTES));
-      expect(value).toBe(value2);
+      assert.strictEqual(value, value2);
     }
 
     // add more slots to cause a new index block to be created.
@@ -919,11 +919,11 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         new HashMapGet(new HashMapGetValue(watKey)),
       ]);
       const value2 = new TextDecoder().decode(cursor!.readBytes(MAX_READ_BYTES));
-      expect(value).toBe(value2);
+      assert.strictEqual(value, value2);
     }
 
     // but we can't get the value that we sliced out of the array list
-    expect(rootCursor.readPath([new ArrayListGet(SLOT_COUNT + 1)])).toBeNull();
+    assert.strictEqual(rootCursor.readPath([new ArrayListGet(SLOT_COUNT + 1)]), null);
   }
 
   // append to inner array_list many times, filling up the array_list until a root overflow occurs
@@ -949,7 +949,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
       const value = `wat${i}`;
       const cursor = rootCursor.readPath([new ArrayListGet(-1), new ArrayListGet(i)]);
       const value2 = new TextDecoder().decode(cursor!.readBytes(MAX_READ_BYTES));
-      expect(value).toBe(value2);
+      assert.strictEqual(value, value2);
     }
 
     // slice the inner array list so it contains exactly SLOT_COUNT, so we have the old root again
@@ -965,11 +965,11 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
       const value = `wat${i}`;
       const cursor = rootCursor.readPath([new ArrayListGet(-1), new ArrayListGet(i)]);
       const value2 = new TextDecoder().decode(cursor!.readBytes(MAX_READ_BYTES));
-      expect(value).toBe(value2);
+      assert.strictEqual(value, value2);
     }
 
     // but we can't get the value that we sliced out of the array list
-    expect(rootCursor.readPath([new ArrayListGet(-1), new ArrayListGet(SLOT_COUNT + 1)])).toBeNull();
+    assert.strictEqual(rootCursor.readPath([new ArrayListGet(-1), new ArrayListGet(SLOT_COUNT + 1)]), null);
 
     // overwrite the last value with hello
     rootCursor.writePath([
@@ -985,7 +985,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
     {
       const cursor = rootCursor.readPath([new ArrayListGet(-1), new ArrayListGet(-1)]);
       const value = new TextDecoder().decode(cursor!.readBytes(MAX_READ_BYTES));
-      expect(value).toBe('hello');
+      assert.strictEqual(value, 'hello');
     }
 
     // overwrite the last value with goodbye
@@ -1002,14 +1002,14 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
     {
       const cursor = rootCursor.readPath([new ArrayListGet(-1), new ArrayListGet(-1)]);
       const value = new TextDecoder().decode(cursor!.readBytes(MAX_READ_BYTES));
-      expect(value).toBe('goodbye');
+      assert.strictEqual(value, 'goodbye');
     }
 
     // previous last value is still hello
     {
       const cursor = rootCursor.readPath([new ArrayListGet(-2), new ArrayListGet(-1)]);
       const value = new TextDecoder().decode(cursor!.readBytes(MAX_READ_BYTES));
-      expect(value).toBe('hello');
+      assert.strictEqual(value, 'hello');
     }
   }
 
@@ -1033,7 +1033,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
 
       const cursor = rootCursor.readPath([new ArrayListGet(-1), new ArrayListGet(-1)]);
       const value2 = new TextDecoder().decode(cursor!.readBytes(MAX_READ_BYTES));
-      expect(value).toBe(value2);
+      assert.strictEqual(value, value2);
     }
 
     // iterate over array_list
@@ -1045,10 +1045,10 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         const nextCursor = iter.next();
         const value = `wat${i}`;
         const value2 = new TextDecoder().decode(nextCursor!.readBytes(MAX_READ_BYTES));
-        expect(value).toBe(value2);
+        assert.strictEqual(value, value2);
         i += 1;
       }
-      expect(i).toBe(10);
+      assert.strictEqual(i, 10);
     }
 
     // set first slot to .none and make sure iteration still works
@@ -1067,12 +1067,12 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         iter.next();
         i += 1;
       }
-      expect(i).toBe(10);
+      assert.strictEqual(i, 10);
     }
 
     // get list slot
     const listCursor = rootCursor.readPath([new ArrayListGet(-1)]);
-    expect(listCursor!.count()).toBe(10);
+    assert.strictEqual(listCursor!.count(), 10);
   }
 
   // iterate over inner hash_map
@@ -1099,7 +1099,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         new HashMapGet(new HashMapGetValue(watKey)),
       ]);
       const value2 = new TextDecoder().decode(cursor!.readBytes(MAX_READ_BYTES));
-      expect(value).toBe(value2);
+      assert.strictEqual(value, value2);
     }
 
     // add foo
@@ -1140,16 +1140,16 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         const kvPair = kvPairCursor!.readKeyValuePair();
         if (arraysEqual(kvPair.hash, fooKey)) {
           const key = new TextDecoder().decode(kvPair.keyCursor.readBytes(MAX_READ_BYTES));
-          expect(key).toBe('foo');
-          expect(kvPair.valueCursor.slotPtr.slot.value).toBe(42n);
+          assert.strictEqual(key, 'foo');
+          assert.strictEqual(kvPair.valueCursor.slotPtr.slot.value, 42n);
         } else {
           const value = kvPair.valueCursor.readBytes(MAX_READ_BYTES);
           const hash = db.hasher.digest(value);
-          expect(arraysEqual(kvPair.hash, hash)).toBe(true);
+          assert.strictEqual(arraysEqual(kvPair.hash, hash), true);
         }
         i += 1;
       }
-      expect(i).toBe(10);
+      assert.strictEqual(i, 10);
     }
 
     // iterate over hash_map with writeable cursor
@@ -1169,7 +1169,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         }
         i += 1;
       }
-      expect(i).toBe(10);
+      assert.strictEqual(i, 10);
     }
   }
 
@@ -1226,7 +1226,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
 
         // get list slot
         const evenListCursor = cursor.readPath([new HashMapGet(new HashMapGetValue(evenKey))]);
-        expect(evenListCursor!.count()).toBe(SLOT_COUNT + 1);
+        assert.strictEqual(evenListCursor!.count(), SLOT_COUNT + 1);
 
         // check all values in the new slice with an iterator
         {
@@ -1237,7 +1237,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
             iter.next();
             i += 1;
           }
-          expect(i).toBe(SLOT_COUNT + 1);
+          assert.strictEqual(i, SLOT_COUNT + 1);
         }
 
         // concat the list with itself multiple times.
@@ -1262,9 +1262,9 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         ]);
 
         // read the new value from the list
-        expect(
+        assert.strictEqual(
           (cursor.readPath([new HashMapGet(new HashMapGetValue(comboKey)), new LinkedArrayListGet(-1)]))!.readUint()
-        ).toBe(3);
+        , 3);
 
         // append more to the new list
         for (let i = 0; i < 500; i++) {
@@ -1431,7 +1431,7 @@ function testSlice(
         const n = (
           cursor.readPath([new HashMapGet(new HashMapGetValue(evenSliceKey)), new LinkedArrayListGet(i)])
         )!.readUint();
-        expect(val).toBe(n);
+        assert.strictEqual(val, n);
       }
 
       // check all values in the new slice with an iterator
@@ -1440,16 +1440,16 @@ function testSlice(
         let i = 0;
         while (iter.hasNext()) {
           const numCursor = iter.next();
-          expect(values[sliceOffset + i]).toBe(numCursor!.readUint());
+          assert.strictEqual(values[sliceOffset + i], numCursor!.readUint());
           i += 1;
         }
-        expect(sliceSize).toBe(i);
+        assert.strictEqual(sliceSize, i);
       }
 
       // there are no extra items
-      expect(
+      assert.strictEqual(
         cursor.readPath([new HashMapGet(new HashMapGetValue(evenSliceKey)), new LinkedArrayListGet(sliceSize)])
-      ).toBeNull();
+      , null);
 
       // concat the slice with itself
       cursor.writePath([
@@ -1467,7 +1467,7 @@ function testSlice(
         const n = (
           cursor.readPath([new HashMapGet(new HashMapGetValue(comboKey)), new LinkedArrayListGet(i)])
         )!.readUint();
-        expect(comboValues[i]).toBe(n);
+        assert.strictEqual(comboValues[i], n);
       }
 
       // append to the slice
@@ -1479,10 +1479,10 @@ function testSlice(
       ]);
 
       // read the new value from the slice
-      expect(
+      assert.strictEqual(
         (cursor.readPath([new HashMapGet(new HashMapGetValue(evenSliceKey)), new LinkedArrayListGet(-1)]))!
           .readUint()
-      ).toBe(3);
+      , 3);
     }),
   ]);
 }
@@ -1557,7 +1557,7 @@ function testConcat(core: Core, hasher: Hasher, listASize: number, listBSize: nu
         const n = (
           cursor.readPath([new HashMapGet(new HashMapGetValue(comboKey)), new LinkedArrayListGet(i)])
         )!.readUint();
-        expect(values[i]).toBe(n);
+        assert.strictEqual(values[i], n);
       }
 
       // check all values in the new slice with an iterator
@@ -1566,16 +1566,16 @@ function testConcat(core: Core, hasher: Hasher, listASize: number, listBSize: nu
         let i = 0;
         while (iter.hasNext()) {
           const numCursor = iter.next();
-          expect(values[i]).toBe(numCursor!.readUint());
+          assert.strictEqual(values[i], numCursor!.readUint());
           i += 1;
         }
-        expect((evenListCursor!.count()) + (oddListCursor!.count())).toBe(i);
+        assert.strictEqual((evenListCursor!.count()) + (oddListCursor!.count()), i);
       }
 
       // there are no extra items
-      expect(
+      assert.strictEqual(
         cursor.readPath([new HashMapGet(new HashMapGetValue(comboKey)), new LinkedArrayListGet(values.length)])
-      ).toBeNull();
+      , null);
     }),
   ]);
 }
@@ -1630,7 +1630,7 @@ function testInsertAndRemove(core: Core, hasher: Hasher, originalSize: number, i
         const n = (
           cursor.readPath([new HashMapGet(new HashMapGetValue(evenInsertKey)), new LinkedArrayListGet(i)])
         )!.readUint();
-        expect(val).toBe(n);
+        assert.strictEqual(val, n);
       }
 
       // check all values in the new list with an iterator
@@ -1639,19 +1639,19 @@ function testInsertAndRemove(core: Core, hasher: Hasher, originalSize: number, i
         let i = 0;
         while (iter.hasNext()) {
           const numCursor = iter.next();
-          expect(values[i]).toBe(numCursor!.readUint());
+          assert.strictEqual(values[i], numCursor!.readUint());
           i += 1;
         }
-        expect(values.length).toBe(i);
+        assert.strictEqual(values.length, i);
       }
 
       // there are no extra items
-      expect(
+      assert.strictEqual(
         cursor.readPath([
           new HashMapGet(new HashMapGetValue(evenInsertKey)),
           new LinkedArrayListGet(values.length),
         ])
-      ).toBeNull();
+      , null);
     }),
   ]);
 
@@ -1680,7 +1680,7 @@ function testInsertAndRemove(core: Core, hasher: Hasher, originalSize: number, i
         const n = (
           cursor.readPath([new HashMapGet(new HashMapGetValue(evenInsertKey)), new LinkedArrayListGet(i)])
         )!.readUint();
-        expect(val).toBe(n);
+        assert.strictEqual(val, n);
       }
 
       // check all values in the new list with an iterator
@@ -1689,19 +1689,19 @@ function testInsertAndRemove(core: Core, hasher: Hasher, originalSize: number, i
         let i = 0;
         while (iter.hasNext()) {
           const numCursor = iter.next();
-          expect(values[i]).toBe(numCursor!.readUint());
+          assert.strictEqual(values[i], numCursor!.readUint());
           i += 1;
         }
-        expect(values.length).toBe(i);
+        assert.strictEqual(values.length, i);
       }
 
       // there are no extra items
-      expect(
+      assert.strictEqual(
         cursor.readPath([
           new HashMapGet(new HashMapGetValue(evenInsertKey)),
           new LinkedArrayListGet(values.length),
         ])
-      ).toBeNull();
+      , null);
     }),
   ]);
 }

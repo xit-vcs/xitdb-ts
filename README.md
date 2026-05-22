@@ -97,18 +97,18 @@ const moment = new ReadHashMap(momentCursor!);
 // the cursor to "foo" and then calling readBytes on it
 const fooCursor = moment.getCursor('foo');
 const fooValue = fooCursor!.readBytes(MAX_READ_BYTES);
-expect(new TextDecoder().decode(fooValue)).toBe('foo');
+assert.strictEqual(new TextDecoder().decode(fooValue), 'foo');
 
 // to get the "fruits" list, we get the cursor to it and
 // then pass it to the ReadArrayList constructor
 const fruitsCursor = moment.getCursor('fruits');
 const fruits = new ReadArrayList(fruitsCursor!);
-expect(fruits.count()).toBe(3);
+assert.strictEqual(fruits.count(), 3);
 
 // now we can get the first item from the fruits list and read it
 const appleCursor = fruits.getCursor(0);
 const appleValue = appleCursor!.readBytes(MAX_READ_BYTES);
-expect(new TextDecoder().decode(appleValue)).toBe('apple');
+assert.strictEqual(new TextDecoder().decode(appleValue), 'apple');
 ```
 
 ## Initializing a Database
@@ -157,7 +157,7 @@ Then, you can read it like this:
 ```typescript
 const randomNumberCursor = moment.getCursor('random-number');
 const randomNumber = randomNumberCursor!.readBytesObject(MAX_READ_BYTES);
-expect(new TextDecoder().decode(randomNumber.formatTag!)).toBe('bi');
+assert.strictEqual(new TextDecoder().decode(randomNumber.formatTag!), 'bi');
 const randomBigInt = randomNumber.value;
 ```
 
@@ -191,12 +191,12 @@ const moment = new ReadHashMap(momentCursor!);
 // the food list includes the fruits
 const foodCursor = moment.getCursor('food');
 const food = new ReadArrayList(foodCursor!);
-expect(food.count()).toBe(6);
+assert.strictEqual(food.count(), 6);
 
 // ...but the fruits list hasn't been changed
 const fruitsCursor = moment.getCursor('fruits');
 const fruits = new ReadArrayList(fruitsCursor!);
-expect(fruits.count()).toBe(3);
+assert.strictEqual(fruits.count(), 3);
 ```
 
 Before we continue, let's save the latest history index, so we can revert back to this moment of the database later:
@@ -232,12 +232,12 @@ const moment = new ReadHashMap(momentCursor!);
 // the cities list contains all four
 const citiesCursor = moment.getCursor('cities');
 const cities = new ReadArrayList(citiesCursor!);
-expect(cities.count()).toBe(4);
+assert.strictEqual(cities.count(), 4);
 
 // ..but so does big-cities! we did not intend to mutate this
 const bigCitiesCursor = moment.getCursor('big-cities');
 const bigCities = new ReadArrayList(bigCitiesCursor!);
-expect(bigCities.count()).toBe(4);
+assert.strictEqual(bigCities.count(), 4);
 ```
 
 The reason that `big-cities` was mutated is because all data in a given transaction is temporarily mutable. This is a very important optimization, but in this case, it's not what we want.
@@ -278,12 +278,12 @@ const moment = new ReadHashMap(momentCursor!);
 // the cities list contains all four
 const citiesCursor = moment.getCursor('cities');
 const cities = new ReadArrayList(citiesCursor!);
-expect(cities.count()).toBe(4);
+assert.strictEqual(cities.count(), 4);
 
 // and big-cities only contains the original two
 const bigCitiesCursor = moment.getCursor('big-cities');
 const bigCities = new ReadArrayList(bigCitiesCursor!);
-expect(bigCities.count()).toBe(2);
+assert.strictEqual(bigCities.count(), 2);
 ```
 
 ## Large Byte Arrays
@@ -315,7 +315,7 @@ for (let n; (n = cursorReader.read(buf)) > 0; ) {
   }
 }
 if (line.length > 0) lineCount++;
-expect(lineCount).toBe(50);
+assert.strictEqual(lineCount, 50);
 ```
 
 ## Iterators
@@ -377,7 +377,7 @@ The size of the hash in bytes will be stored in the database's header. If you tr
 ```typescript
 core.seek(0);
 const header = Header.read(core);
-expect(header.hashSize).toBe(20);
+assert.strictEqual(header.hashSize, 20);
 ```
 
 The hash size alone does not disambiguate hashing algorithms, though. In addition, xitdb reserves four bytes in the header that you can use to put the name of the algorithm. You must provide it in the `Hasher` constructor:
@@ -391,7 +391,7 @@ The hash id is only written to the database header when it is first initialized.
 ```typescript
 core.seek(0);
 const header = Header.read(core);
-expect(Hasher.idToString(header.hashId)).toBe("sha1");
+assert.strictEqual(Hasher.idToString(header.hashId), "sha1");
 ```
 
 If you want to use SHA-256, I recommend using `sha2` as the hash id. You can then distinguish between SHA-256 and SHA-512 using the hash size, like this:
@@ -431,7 +431,7 @@ const compactDb = db.compact(compactCore);
 
 // read from the new compacted db
 const history = new ReadArrayList(compactDb.rootCursor());
-expect(history.count()).toBe(1);
+assert.strictEqual(history.count(), 1);
 ```
 
 This compacted database will be in a separate file. If you want to delete the original database and replace it with this one, you'll need to do that yourself. It is not possible to compact a database in-place (using the same file as the target database); doing so would fail and would render your original database unreadable.
