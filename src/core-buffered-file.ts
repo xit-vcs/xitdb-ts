@@ -117,6 +117,11 @@ class RandomAccessBufferedFile implements DataReader, DataWriter {
       this.memory.seek(this.filePos - this.memoryPos);
       this.memory.memory.write(buffer);
     } else {
+      // a direct disk write that overlaps the buffered region would be
+      // clobbered by a later flush of stale buffer bytes, so flush first
+      if (this.filePos < this.memoryPos + this.memory.length() && this.filePos + buffer.length > this.memoryPos) {
+        this.flush();
+      }
       // Write directly to file
       this.file.seek(this.filePos);
       this.file.writer().write(buffer);
