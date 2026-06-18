@@ -6,14 +6,13 @@ import {
   Database,
   WriteMode,
   ArrayListHeader,
-  LinkedArrayListHeader,
+  BTreeHeader,
   KeyValuePair,
   type PathPart,
   ArrayListGet,
   INDEX_BLOCK_SIZE,
-  LINKED_ARRAY_LIST_INDEX_BLOCK_SIZE,
+  BTREE_NODE_HEADER_SIZE,
   SLOT_COUNT,
-  LinkedArrayListSlot,
 } from './database.js';
 import {
   UnexpectedTagException,
@@ -234,9 +233,9 @@ export class ReadCursor implements Slotted {
       }
       case Tag.LINKED_ARRAY_LIST: {
         this.db.core.seek(Number(this.slotPtr.slot.value));
-        const headerBytes = new Uint8Array(LinkedArrayListHeader.LENGTH);
+        const headerBytes = new Uint8Array(BTreeHeader.LENGTH);
         reader.readFully(headerBytes);
-        const header = LinkedArrayListHeader.fromBytes(headerBytes);
+        const header = BTreeHeader.fromBytes(headerBytes);
         return header.size;
       }
       case Tag.BYTES: {
@@ -399,52 +398,58 @@ export class CursorIterator {
         const header = ArrayListHeader.fromBytes(headerBytes);
         this.size = this.cursor.count();
         this.index = 0;
-        this.stack = this.initStack(this.cursor, header.ptr, INDEX_BLOCK_SIZE);
+        this.stack = this.initStack(this.cursor, header.ptr);
         break;
       }
       case Tag.LINKED_ARRAY_LIST: {
+        // backed by a b-tree: read the header, then walk from the root node's
+        // value/child slots (skipping its kind+num header)
         const position = Number(this.cursor.slotPtr.slot.value);
         this.cursor.db.core.seek(position);
         const reader = this.cursor.db.core.reader();
-        const headerBytes = new Uint8Array(LinkedArrayListHeader.LENGTH);
+        const headerBytes = new Uint8Array(BTreeHeader.LENGTH);
         reader.readFully(headerBytes);
-        const header = LinkedArrayListHeader.fromBytes(headerBytes);
+        const header = BTreeHeader.fromBytes(headerBytes);
         this.size = this.cursor.count();
         this.index = 0;
-        this.stack = this.initStack(this.cursor, header.ptr, LINKED_ARRAY_LIST_INDEX_BLOCK_SIZE);
+        this.stack = this.initStack(this.cursor, header.rootPtr + BTREE_NODE_HEADER_SIZE);
         break;
       }
       case Tag.HASH_MAP:
       case Tag.HASH_SET:
         this.size = 0;
         this.index = 0;
-        this.stack = this.initStack(this.cursor, Number(this.cursor.slotPtr.slot.value), INDEX_BLOCK_SIZE);
+        this.stack = this.initStack(this.cursor, Number(this.cursor.slotPtr.slot.value));
         break;
       case Tag.COUNTED_HASH_MAP:
       case Tag.COUNTED_HASH_SET:
         this.size = 0;
         this.index = 0;
-        this.stack = this.initStack(this.cursor, Number(this.cursor.slotPtr.slot.value) + 8, INDEX_BLOCK_SIZE);
+        this.stack = this.initStack(this.cursor, Number(this.cursor.slotPtr.slot.value) + 8);
         break;
       default:
         throw new UnexpectedTagException();
     }
   }
 
-  private initStack(cursor: ReadCursor, position: number, blockSize: number): IteratorLevel[] {
+  // read a 16-slot index block (the iterable structures all use 9-byte slots in
+  // their index/node blocks)
+  private readSlotBlock(cursor: ReadCursor, position: number): Slot[] {
     cursor.db.core.seek(position);
     const reader = cursor.db.core.reader();
-    const indexBlockBytes = new Uint8Array(blockSize);
+    const indexBlockBytes = new Uint8Array(INDEX_BLOCK_SIZE);
     reader.readFully(indexBlockBytes);
 
     const indexBlock: Slot[] = new Array(SLOT_COUNT);
-    const slotSize = blockSize / SLOT_COUNT;
     for (let i = 0; i < SLOT_COUNT; i++) {
-      const slotBytes = indexBlockBytes.slice(i * slotSize, i * slotSize + Slot.LENGTH);
+      const slotBytes = indexBlockBytes.slice(i * Slot.LENGTH, i * Slot.LENGTH + Slot.LENGTH);
       indexBlock[i] = Slot.fromBytes(slotBytes);
     }
+    return indexBlock;
+  }
 
-    return [new IteratorLevel(position, indexBlock, 0)];
+  private initStack(cursor: ReadCursor, position: number): IteratorLevel[] {
+    return [new IteratorLevel(position, this.readSlotBlock(cursor, position), 0)];
   }
 
   hasNext(): boolean {
@@ -460,7 +465,7 @@ export class CursorIterator {
       case Tag.COUNTED_HASH_MAP:
       case Tag.COUNTED_HASH_SET:
         if (this.nextCursorMaybe === null) {
-          this.nextCursorMaybe = this.nextInternal(INDEX_BLOCK_SIZE);
+          this.nextCursorMaybe = this.nextInternal(0);
         }
         return this.nextCursorMaybe !== null;
       default:
@@ -475,11 +480,13 @@ export class CursorIterator {
       case Tag.ARRAY_LIST:
         if (!(this.hasNext())) return null;
         this.index += 1;
-        return this.nextInternal(INDEX_BLOCK_SIZE);
+        return this.nextInternal(0);
       case Tag.LINKED_ARRAY_LIST:
         if (!(this.hasNext())) return null;
         this.index += 1;
-        return this.nextInternal(LINKED_ARRAY_LIST_INDEX_BLOCK_SIZE);
+        // b-tree nodes have a kind+num header before their slots, so child pointers
+        // are offset by BTREE_NODE_HEADER_SIZE
+        return this.nextInternal(BTREE_NODE_HEADER_SIZE);
       case Tag.HASH_MAP:
       case Tag.HASH_SET:
       case Tag.COUNTED_HASH_MAP:
@@ -489,14 +496,14 @@ export class CursorIterator {
           this.nextCursorMaybe = null;
           return nextCursor;
         } else {
-          return this.nextInternal(INDEX_BLOCK_SIZE);
+          return this.nextInternal(0);
         }
       default:
         throw new UnexpectedTagException();
     }
   }
 
-  private nextInternal(blockSize: number): ReadCursor | null {
+  private nextInternal(nodeOffset: number): ReadCursor | null {
     while (this.stack.length > 0) {
       const level = this.stack[this.stack.length - 1];
       if (level.index === level.block.length) {
@@ -508,20 +515,9 @@ export class CursorIterator {
       } else {
         const nextSlot = level.block[level.index];
         if (nextSlot.tag === Tag.INDEX) {
-          const nextPos = Number(nextSlot.value);
-          this.cursor.db.core.seek(nextPos);
-          const reader = this.cursor.db.core.reader();
-          const indexBlockBytes = new Uint8Array(blockSize);
-          reader.readFully(indexBlockBytes);
-
-          const indexBlock: Slot[] = new Array(SLOT_COUNT);
-          const slotSize = blockSize / SLOT_COUNT;
-          for (let i = 0; i < SLOT_COUNT; i++) {
-            const slotBytes = indexBlockBytes.slice(i * slotSize, i * slotSize + Slot.LENGTH);
-            indexBlock[i] = Slot.fromBytes(slotBytes);
-          }
-
-          this.stack.push(new IteratorLevel(nextPos, indexBlock, 0));
+          // nodeOffset skips a b-tree node's kind+num header
+          const nextPos = Number(nextSlot.value) + nodeOffset;
+          this.stack.push(new IteratorLevel(nextPos, this.readSlotBlock(this.cursor, nextPos), 0));
           continue;
         } else {
           this.stack[this.stack.length - 1].index += 1;
