@@ -1360,6 +1360,20 @@ function testSortedMap(core: Core, hasher: Hasher): void {
           new WriteData(new Bytes('x')),
         ]);
       }, CursorNotWriteableException);
+
+      // a write that fails after the key is inserted (a missing key written through
+      // the non-writeable key slot) must still leave the count consistent with the
+      // tree, not inserted-but-uncounted
+      const countBeforeFailedWrite = map.count();
+      assert.throws(() => {
+        (map.cursor as WriteCursor).writePath([
+          new SortedMapGet(new SortedMapGetKey(new TextEncoder().encode('missing-key'))),
+          new WriteData(new Bytes('x')),
+        ]);
+      }, CursorNotWriteableException);
+      assert.strictEqual(map.count(), countBeforeFailedWrite + 1);
+      assert.ok(map.getKeyValuePair('missing-key') !== null);
+      map.remove('missing-key'); // restore the map for the assertions below
     });
   }
 

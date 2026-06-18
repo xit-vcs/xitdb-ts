@@ -745,20 +745,19 @@ export class LinkedArrayListAppend implements PathPartBase {
     const result = db.btreeInsert(header.rootPtr, header.size);
     const newRootPtr = db.btreeGrowRoot(result);
 
+    // update the header before filling in the value, so that a failure in the
+    // rest of the path leaves the tree and header consistent
+    const writer = db.core.writer();
+    db.core.seek(headerPtr);
+    writer.write(new BTreeHeader(newRootPtr, header.size + 1).toBytes());
+
     // fill in the value via the rest of the path
-    const finalSlotPtr = db.readSlotPointer(
+    return db.readSlotPointer(
       writeMode,
       path,
       pathI + 1,
       new SlotPointer(result.valuePosition, new Slot())
     );
-
-    // update header
-    const writer = db.core.writer();
-    db.core.seek(headerPtr);
-    writer.write(new BTreeHeader(newRootPtr, header.size + 1).toBytes());
-
-    return finalSlotPtr;
   }
 }
 
@@ -793,14 +792,14 @@ export class LinkedArrayListSlice implements PathPartBase {
     const afterOffset = db.btreeSplit(header.rootPtr, this.offset);
     const sliced = db.btreeSplit(afterOffset.right, this.size);
     const newRootPtr = sliced.left;
-    const finalSlotPtr = db.readSlotPointer(writeMode, path, pathI + 1, slotPtr);
 
-    // update header
+    // update the header before recursing into the rest of the path, so that a
+    // failure there leaves the tree and header consistent
     const writer = db.core.writer();
     db.core.seek(headerPtr);
     writer.write(new BTreeHeader(newRootPtr, this.size).toBytes());
 
-    return finalSlotPtr;
+    return db.readSlotPointer(writeMode, path, pathI + 1, slotPtr);
   }
 }
 
@@ -837,14 +836,14 @@ export class LinkedArrayListConcat implements PathPartBase {
     // referenced elsewhere.
     db.txStart = db.core.length();
     const newRootPtr = db.btreeJoin(headerA.rootPtr, headerB.rootPtr);
-    const finalSlotPtr = db.readSlotPointer(writeMode, path, pathI + 1, slotPtr);
 
-    // update header
+    // update the header before recursing into the rest of the path, so that a
+    // failure there leaves the tree and header consistent
     const writer = db.core.writer();
     db.core.seek(headerPtr);
     writer.write(new BTreeHeader(newRootPtr, headerA.size + headerB.size).toBytes());
 
-    return finalSlotPtr;
+    return db.readSlotPointer(writeMode, path, pathI + 1, slotPtr);
   }
 }
 
@@ -879,19 +878,18 @@ export class LinkedArrayListInsert implements PathPartBase {
     const result = db.btreeInsert(header.rootPtr, rank);
     const newRootPtr = db.btreeGrowRoot(result);
 
-    const finalSlotPtr = db.readSlotPointer(
+    // update the header before filling in the value, so that a failure in the
+    // rest of the path leaves the tree and header consistent
+    const writer = db.core.writer();
+    db.core.seek(headerPtr);
+    writer.write(new BTreeHeader(newRootPtr, header.size + 1).toBytes());
+
+    return db.readSlotPointer(
       writeMode,
       path,
       pathI + 1,
       new SlotPointer(result.valuePosition, new Slot())
     );
-
-    // update header
-    const writer = db.core.writer();
-    db.core.seek(headerPtr);
-    writer.write(new BTreeHeader(newRootPtr, header.size + 1).toBytes());
-
-    return finalSlotPtr;
   }
 }
 
@@ -927,14 +925,14 @@ export class LinkedArrayListRemove implements PathPartBase {
     const before = db.btreeSplit(header.rootPtr, rank);
     const after = db.btreeSplit(before.right, 1);
     const newRootPtr = db.btreeJoin(before.left, after.right);
-    const finalSlotPtr = db.readSlotPointer(writeMode, path, pathI + 1, slotPtr);
 
-    // update header
+    // update the header before recursing into the rest of the path, so that a
+    // failure there leaves the tree and header consistent
     const writer = db.core.writer();
     db.core.seek(headerPtr);
     writer.write(new BTreeHeader(newRootPtr, header.size - 1).toBytes());
 
-    return finalSlotPtr;
+    return db.readSlotPointer(writeMode, path, pathI + 1, slotPtr);
   }
 }
 
@@ -1253,15 +1251,17 @@ export class SortedMapGet implements PathPartBase {
     } else {
       const result = db.sortedPut(header.rootPtr, key);
       const newRootPtr = db.sortedGrowRoot(result);
-      const kvPos = result.valuePosition - db.header.hashSize - Slot.LENGTH;
-      const targetSlot = db.sortedTargetSlot(kvPos, this.target);
-      const finalSlotPtr = db.readSlotPointer(writeMode, path, pathI + 1, targetSlot);
 
+      // update the header before filling in the value, so that a failure in the
+      // rest of the path leaves the tree and header consistent (the entry exists
+      // with an empty value) rather than inserted-but-uncounted
       const writer = db.core.writer();
       db.core.seek(headerPtr);
       writer.write(new BTreeHeader(newRootPtr, header.size + (result.added ? 1 : 0)).toBytes());
 
-      return finalSlotPtr;
+      const kvPos = result.valuePosition - db.header.hashSize - Slot.LENGTH;
+      const targetSlot = db.sortedTargetSlot(kvPos, this.target);
+      return db.readSlotPointer(writeMode, path, pathI + 1, targetSlot);
     }
   }
 }
