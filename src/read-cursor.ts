@@ -12,6 +12,7 @@ import {
   ArrayListGet,
   INDEX_BLOCK_SIZE,
   BTREE_NODE_HEADER_SIZE,
+  BTreeNodeKind,
   SLOT_COUNT,
 } from './database.js';
 import {
@@ -231,7 +232,9 @@ export class ReadCursor implements Slotted {
         const header = ArrayListHeader.fromBytes(headerBytes);
         return header.size;
       }
-      case Tag.LINKED_ARRAY_LIST: {
+      case Tag.LINKED_ARRAY_LIST:
+      case Tag.SORTED_MAP:
+      case Tag.SORTED_SET: {
         this.db.core.seek(Number(this.slotPtr.slot.value));
         const headerBytes = new Uint8Array(BTreeHeader.LENGTH);
         reader.readFully(headerBytes);
@@ -382,6 +385,110 @@ export class CursorIterator {
     this.cursor = cursor;
   }
 
+  // start a sorted-map iterator at the entry with rank startIndex (the count descent),
+  // iterating in key order from there
+  static initSortedFromIndex(cursor: ReadCursor, startIndex: number): CursorIterator {
+    const total = cursor.count();
+    const it = new CursorIterator(cursor);
+    // an unwritten map is NONE (like iterator()): yield nothing
+    if (cursor.slotPtr.slot.tag === Tag.NONE || startIndex >= total) {
+      return it;
+    }
+    const rootPtr = CursorIterator.sortedRootPtr(cursor);
+    it.size = total;
+    it.index = startIndex;
+    it.stack = CursorIterator.sortedStackFromIndex(cursor, rootPtr, startIndex);
+    return it;
+  }
+
+  // start a sorted-map iterator at the first entry with key >= startKey
+  static initSortedFromKey(cursor: ReadCursor, startKey: Uint8Array): CursorIterator {
+    const it = new CursorIterator(cursor);
+    if (cursor.slotPtr.slot.tag === Tag.NONE) {
+      return it;
+    }
+    const total = cursor.count();
+    const rootPtr = CursorIterator.sortedRootPtr(cursor);
+    const built = CursorIterator.sortedStackFromKey(cursor, rootPtr, startKey);
+    it.size = total;
+    it.index = built.before;
+    it.stack = built.stack;
+    return it;
+  }
+
+  private static sortedRootPtr(cursor: ReadCursor): number {
+    switch (cursor.slotPtr.slot.tag) {
+      case Tag.SORTED_MAP:
+      case Tag.SORTED_SET:
+        break;
+      default:
+        throw new UnexpectedTagException();
+    }
+    cursor.db.core.seek(Number(cursor.slotPtr.slot.value));
+    const reader = cursor.db.core.reader();
+    const headerBytes = new Uint8Array(BTreeHeader.LENGTH);
+    reader.readFully(headerBytes);
+    const header = BTreeHeader.fromBytes(headerBytes);
+    return header.rootPtr;
+  }
+
+  private static sortedStackFromIndex(cursor: ReadCursor, rootPtr: number, startIndex: number): IteratorLevel[] {
+    const stack: IteratorLevel[] = [];
+    let nodePtr = rootPtr;
+    let rem = startIndex;
+    while (true) {
+      const node = cursor.db.readSortedNode(nodePtr);
+      const position = nodePtr + BTREE_NODE_HEADER_SIZE;
+      if (node.kind === BTreeNodeKind.LEAF) {
+        stack.push(new IteratorLevel(position, node.entries, rem));
+        return stack;
+      } else {
+        let i = 0;
+        while (i + 1 < node.num && rem >= node.counts[i]) {
+          rem -= node.counts[i];
+          i++;
+        }
+        stack.push(new IteratorLevel(position, node.children, i));
+        nodePtr = Number(node.children[i].value);
+      }
+    }
+  }
+
+  private static sortedStackFromKey(
+    cursor: ReadCursor,
+    rootPtr: number,
+    key: Uint8Array
+  ): { stack: IteratorLevel[]; before: number } {
+    const stack: IteratorLevel[] = [];
+    let nodePtr = rootPtr;
+    let before = 0;
+    while (true) {
+      const node = cursor.db.readSortedNode(nodePtr);
+      const position = nodePtr + BTREE_NODE_HEADER_SIZE;
+      if (node.kind === BTreeNodeKind.LEAF) {
+        let li = node.num;
+        for (let j = 0; j < node.num; j++) {
+          const kv = cursor.db.readKvPair(node.entries[j]);
+          if (cursor.db.compareKey(kv.keySlot, key) >= 0) {
+            li = j;
+            break;
+          }
+        }
+        before += li;
+        stack.push(new IteratorLevel(position, node.entries, li));
+        return { stack, before };
+      } else {
+        let i = 0;
+        while (i + 1 < node.num && cursor.db.compareKey(node.separators[i + 1], key) <= 0) {
+          before += node.counts[i];
+          i++;
+        }
+        stack.push(new IteratorLevel(position, node.children, i));
+        nodePtr = Number(node.children[i].value);
+      }
+    }
+  }
+
   init(): void {
     switch (this.cursor.slotPtr.slot.tag) {
       case Tag.NONE:
@@ -401,7 +508,9 @@ export class CursorIterator {
         this.stack = this.initStack(this.cursor, header.ptr);
         break;
       }
-      case Tag.LINKED_ARRAY_LIST: {
+      case Tag.LINKED_ARRAY_LIST:
+      case Tag.SORTED_MAP:
+      case Tag.SORTED_SET: {
         // backed by a b-tree: read the header, then walk from the root node's
         // value/child slots (skipping its kind+num header)
         const position = Number(this.cursor.slotPtr.slot.value);
@@ -459,6 +568,8 @@ export class CursorIterator {
       case Tag.ARRAY_LIST:
         return this.index < this.size;
       case Tag.LINKED_ARRAY_LIST:
+      case Tag.SORTED_MAP:
+      case Tag.SORTED_SET:
         return this.index < this.size;
       case Tag.HASH_MAP:
       case Tag.HASH_SET:
@@ -482,6 +593,8 @@ export class CursorIterator {
         this.index += 1;
         return this.nextInternal(0);
       case Tag.LINKED_ARRAY_LIST:
+      case Tag.SORTED_MAP:
+      case Tag.SORTED_SET:
         if (!(this.hasNext())) return null;
         this.index += 1;
         // b-tree nodes have a kind+num header before their slots, so child pointers

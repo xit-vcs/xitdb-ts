@@ -61,6 +61,12 @@ export {
   BTreeWriteSlot,
   BTreeJoinResult,
   BTreeSplitResult,
+  SortedNode,
+  SortedSplit,
+  SortedInsertResult,
+  SortedRemoveResult,
+  SortedSlot,
+  SortedEntry,
   VERSION,
   MAGIC_NUMBER,
   BIT_COUNT,
@@ -73,6 +79,8 @@ export {
   BTREE_NODE_HEADER_SIZE,
   BTREE_LEAF_BLOCK_SIZE,
   BTREE_BRANCH_BLOCK_SIZE,
+  SORTED_LEAF_BLOCK_SIZE,
+  SORTED_BRANCH_BLOCK_SIZE,
   // PathParts
   type PathPart,
   ArrayListInit,
@@ -89,6 +97,10 @@ export {
   HashMapInit,
   HashMapGet,
   HashMapRemove,
+  SortedMapInit,
+  SortedMapGet,
+  SortedMapGetIndex,
+  SortedMapRemove,
   WriteData,
   Context,
   // HashMapGetTarget
@@ -96,6 +108,11 @@ export {
   HashMapGetKVPair,
   HashMapGetKey,
   HashMapGetValue,
+  // SortedMapGetTarget
+  type SortedMapGetTarget,
+  SortedMapGetKVPair,
+  SortedMapGetKey,
+  SortedMapGetValue,
   type ContextFunction,
 } from './database.js';
 
@@ -116,3 +133,7 @@ export { ReadCountedHashMap } from './read-counted-hash-map.js';
 export { WriteCountedHashMap } from './write-counted-hash-map.js';
 export { ReadCountedHashSet } from './read-counted-hash-set.js';
 export { WriteCountedHashSet } from './write-counted-hash-set.js';
+export { ReadSortedMap } from './read-sorted-map.js';
+export { WriteSortedMap } from './write-sorted-map.js';
+export { ReadSortedSet } from './read-sorted-set.js';
+export { WriteSortedSet } from './write-sorted-set.js';

@@ -13,10 +13,12 @@ export const enum Tag {
   HASH_SET = 11,
   COUNTED_HASH_MAP = 12,
   COUNTED_HASH_SET = 13,
+  SORTED_MAP = 14,
+  SORTED_SET = 15,
 }
 
 export function tagValueOf(n: number): Tag {
-  if (n < 0 || n > 13) {
+  if (n < 0 || n > 15) {
     throw new Error(`Invalid tag value: ${n}`);
   }
   return n as Tag;

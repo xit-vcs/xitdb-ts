@@ -20,11 +20,25 @@ import {
   WriteCountedHashMap,
   ReadCountedHashSet,
   WriteCountedHashSet,
+  ReadSortedMap,
+  WriteSortedMap,
+  ReadSortedSet,
+  WriteSortedSet,
   Bytes,
   Uint,
   Int,
   Float,
+  Slot,
+  SlotPointer,
+  ReadCursor,
+  WriteCursor,
+  SortedMapGet,
+  SortedMapGetIndex,
+  SortedMapGetKey,
+  WriteData,
   InvalidTopLevelTypeException,
+  WriteNotAllowedException,
+  CursorNotWriteableException,
 } from '../src';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -952,6 +966,17 @@ function testCompaction(
         const cset = new WriteCountedHashSet(csetCursor);
         cset.put('p');
         cset.put('q');
+
+        // SortedMap
+        const sorted = new WriteSortedMap(moment.putCursor('sorted'));
+        sorted.put('apple', new Uint(1));
+        sorted.put('banana', new Uint(2));
+        sorted.put('cherry', new Uint(3));
+
+        // SortedSet
+        const sortedSet = new WriteSortedSet(moment.putCursor('sortedset'));
+        sortedSet.put('foo');
+        sortedSet.put('bar');
       });
     }
 
@@ -1033,6 +1058,21 @@ function testCompaction(
     const cset = new ReadCountedHashSet(csetCursor!);
     assert.strictEqual(cset.count(), 2);
     assert.strictEqual(decoder.decode((cset.getCursor('p'))!.readBytes(MAX_READ_BYTES)), 'p');
+
+    // SortedMap
+    const sorted = new ReadSortedMap(moment.getCursor('sorted')!);
+    assert.strictEqual(sorted.count(), 3);
+    assert.strictEqual(sorted.getCursor('banana')!.readUint(), 2);
+    // lexicographic order is preserved across compaction
+    assert.strictEqual(decoder.decode(sorted.getIndexKeyValuePair(0)!.keyCursor.readBytes(MAX_READ_BYTES)), 'apple');
+    assert.strictEqual(decoder.decode(sorted.getIndexKeyValuePair(-1)!.keyCursor.readBytes(MAX_READ_BYTES)), 'cherry');
+
+    // SortedSet
+    const sortedSet = new ReadSortedSet(moment.getCursor('sortedset')!);
+    assert.strictEqual(sortedSet.count(), 2);
+    assert.ok(sortedSet.contains('foo'));
+    assert.ok(sortedSet.contains('bar'));
+    assert.ok(!sortedSet.contains('baz'));
   }
 
   // structural sharing (most data shared, only 1 key changes per moment)
@@ -1157,5 +1197,205 @@ function testCompaction(
       // original data should still be in moment 1 (inherited)
       assert.strictEqual(decoder.decode((m1.getCursor('original'))!.readBytes(MAX_READ_BYTES)), 'original_data');
     }
+  }
+}
+describe('Sorted Map', () => {
+  test('in-memory storage', () => {
+    const core = new CoreMemory();
+    testSortedMap(core, new Hasher('SHA-1'));
+  });
+
+  test('file storage', () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-'));
+    try {
+      using core = new CoreFile(join(tmpDir, 'test.db'));
+      testSortedMap(core, new Hasher('SHA-1'));
+    } finally {
+      rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  test('buffered file storage', () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-'));
+    try {
+      using core = new CoreBufferedFile(join(tmpDir, 'test.db'));
+      testSortedMap(core, new Hasher('SHA-1'));
+    } finally {
+      rmSync(tmpDir, { recursive: true });
+    }
+  });
+});
+
+function testSortedMap(core: Core, hasher: Hasher): void {
+  core.setLength(0);
+  const db = new Database(core, hasher);
+  const decoder = new TextDecoder();
+
+  // keys "k0000".."k0059" sort lexicographically in numeric order
+  const COUNT = 60;
+  const k = (i: number) => 'k' + String(i).padStart(4, '0');
+
+  {
+    const history = new WriteArrayList(db.rootCursor());
+    history.appendContext(history.getSlot(-1), (cursor) => {
+      const moment = new WriteHashMap(cursor);
+      const map = new WriteSortedMap(moment.putCursor('map'));
+
+      // insert in reverse order to exercise front-insertions and splits
+      for (let i = COUNT; i > 0;) {
+        i -= 1;
+        map.put(k(i), new Uint(i));
+      }
+      assert.strictEqual(map.count(), COUNT);
+
+      // dedup: re-putting an existing key replaces the value, not the count
+      map.put('k0005', new Uint(999));
+      assert.strictEqual(map.count(), COUNT);
+      assert.strictEqual(map.getCursor('k0005')!.readUint(), 999);
+      map.put('k0005', new Uint(5));
+
+      // ordered iteration yields k0000..k0059 in order with intact values
+      {
+        let n = 0;
+        const iter = map.iterator();
+        while (iter.hasNext()) {
+          const kv = iter.next()!.readKeyValuePair();
+          assert.strictEqual(decoder.decode(kv.keyCursor.readBytes(MAX_READ_BYTES)), k(n));
+          assert.strictEqual(kv.valueCursor.readUint(), n);
+          n += 1;
+        }
+        assert.strictEqual(n, COUNT);
+      }
+
+      assert.notStrictEqual(map.getCursor('k0042'), null);
+      assert.strictEqual(map.getCursor('nope'), null);
+
+      // getByIndex (positive and negative) and rank are inverses
+      {
+        for (let idx = 0; idx < COUNT; idx++) {
+          const kv = map.getIndexKeyValuePair(idx)!;
+          const key = decoder.decode(kv.keyCursor.readBytes(MAX_READ_BYTES));
+          assert.strictEqual(key, k(idx));
+          assert.strictEqual(map.rank(key), idx);
+        }
+        const last = map.getIndexKeyValuePair(-1)!;
+        assert.strictEqual(decoder.decode(last.keyCursor.readBytes(MAX_READ_BYTES)), 'k0059');
+        assert.strictEqual(map.getIndexKeyValuePair(COUNT), null);
+      }
+
+      // lower-bound iteration from a present and an absent key
+      {
+        const iter = map.iteratorFrom('k0030');
+        assert.strictEqual(decoder.decode(iter.next()!.readKeyValuePair().keyCursor.readBytes(MAX_READ_BYTES)), 'k0030');
+      }
+      {
+        // "k00095" sorts between "k0009" and "k0010"
+        const iter = map.iteratorFrom('k00095');
+        assert.strictEqual(decoder.decode(iter.next()!.readKeyValuePair().keyCursor.readBytes(MAX_READ_BYTES)), 'k0010');
+      }
+      {
+        const iter = map.iteratorFromIndex(COUNT - 2);
+        assert.strictEqual(decoder.decode(iter.next()!.readKeyValuePair().keyCursor.readBytes(MAX_READ_BYTES)), 'k0058');
+      }
+
+      // remove the even keys, then re-verify order, count, and presence
+      {
+        for (let j = 0; j < COUNT; j += 2) {
+          assert.ok(map.remove(k(j)));
+        }
+        assert.strictEqual(map.count(), COUNT / 2);
+        assert.ok(!map.remove('k0000')); // already gone
+
+        let expectI = 1;
+        let seen = 0;
+        const iter = map.iterator();
+        while (iter.hasNext()) {
+          const kv = iter.next()!.readKeyValuePair();
+          assert.strictEqual(decoder.decode(kv.keyCursor.readBytes(MAX_READ_BYTES)), k(expectI));
+          expectI += 2;
+          seen += 1;
+        }
+        assert.strictEqual(seen, COUNT / 2);
+      }
+
+      // iterating-from on an unwritten (none) map yields nothing, like iterator()
+      {
+        const noneCursor = new ReadCursor(new SlotPointer(null, new Slot()), db);
+        const empty = new ReadSortedMap(noneCursor);
+        assert.ok(!empty.iteratorFrom('anything').hasNext());
+        assert.ok(!empty.iteratorFromIndex(0).hasNext());
+      }
+
+      // SortedSet with mixed short (inline) and long (external) keys
+      const set = new WriteSortedSet(moment.putCursor('set'));
+      set.put('short');
+      set.put('a-much-longer-key-stored-externally');
+      set.put('mid');
+      set.put('short'); // dup is a no-op
+      assert.strictEqual(set.count(), 3);
+      assert.ok(set.contains('mid'));
+      assert.ok(!set.contains('nope'));
+      {
+        const want = ['a-much-longer-key-stored-externally', 'mid', 'short'];
+        let n = 0;
+        const iter = set.iterator();
+        while (iter.hasNext()) {
+          const kv = iter.next()!.readKeyValuePair();
+          assert.strictEqual(decoder.decode(kv.keyCursor.readBytes(MAX_READ_BYTES)), want[n]);
+          n += 1;
+        }
+        assert.strictEqual(n, 3);
+      }
+      assert.ok(set.remove('mid'));
+      assert.strictEqual(set.count(), 2);
+
+      // immutability guards: positional access is read-only, and keys/entries cannot be
+      // overwritten through the low-level path API
+      assert.throws(() => {
+        (map.cursor as WriteCursor).writePath([new SortedMapGetIndex(0)]);
+      }, WriteNotAllowedException);
+      assert.throws(() => {
+        (map.cursor as WriteCursor).writePath([
+          new SortedMapGet(new SortedMapGetKey(new TextEncoder().encode('k0001'))),
+          new WriteData(new Bytes('x')),
+        ]);
+      }, CursorNotWriteableException);
+    });
+  }
+
+  // the map persists in the committed moment
+  {
+    const history = new ReadArrayList(db.rootCursor());
+    const moment = new ReadHashMap(history.getCursor(-1)!);
+    const map = new ReadSortedMap(moment.getCursor('map')!);
+    assert.strictEqual(map.count(), COUNT / 2);
+    assert.strictEqual(decoder.decode(map.getIndexKeyValuePair(0)!.keyCursor.readBytes(MAX_READ_BYTES)), 'k0001');
+  }
+
+  // a second moment that inherits and mutates the map must not disturb the first
+  // (copy-on-write immutability across transactions)
+  {
+    const history = new WriteArrayList(db.rootCursor());
+    history.appendContext(history.getSlot(-1), (cursor) => {
+      const moment = new WriteHashMap(cursor);
+      const map = new WriteSortedMap(moment.putCursor('map'));
+      assert.ok(map.remove('k0001'));
+      map.put('k0001', new Uint(7)); // not in moment 0
+    });
+  }
+  {
+    const history = new ReadArrayList(db.rootCursor());
+
+    // moment 0 (original) is unchanged: k0001 still present with value 1
+    const m0 = new ReadHashMap(history.getCursor(0)!);
+    const map0 = new ReadSortedMap(m0.getCursor('map')!);
+    assert.strictEqual(map0.count(), COUNT / 2);
+    assert.strictEqual(map0.getCursor('k0001')!.readUint(), 1);
+
+    // moment 1 reflects the mutation: k0001 re-added with value 7
+    const m1 = new ReadHashMap(history.getCursor(1)!);
+    const map1 = new ReadSortedMap(m1.getCursor('map')!);
+    assert.strictEqual(map1.count(), COUNT / 2);
+    assert.strictEqual(map1.getCursor('k0001')!.readUint(), 7);
   }
 }

@@ -44,6 +44,11 @@ export const BTREE_SPLIT_COUNT = Math.floor((BTREE_SLOT_COUNT + 1) / 2); // left
 export const BTREE_NODE_HEADER_SIZE = 2;
 export const BTREE_LEAF_BLOCK_SIZE = BTREE_NODE_HEADER_SIZE + Slot.LENGTH * BTREE_SLOT_COUNT;
 export const BTREE_BRANCH_BLOCK_SIZE = BTREE_NODE_HEADER_SIZE + (Slot.LENGTH + 8) * BTREE_SLOT_COUNT;
+// sorted_map / sorted_set node block: [kind: u8][num: u8] then, for a leaf,
+// BTREE_SLOT_COUNT .kv_pair slots; for a branch, BTREE_SLOT_COUNT child slots, then
+// BTREE_SLOT_COUNT separator slots, then BTREE_SLOT_COUNT u64 counts
+export const SORTED_LEAF_BLOCK_SIZE = BTREE_NODE_HEADER_SIZE + Slot.LENGTH * BTREE_SLOT_COUNT;
+export const SORTED_BRANCH_BLOCK_SIZE = BTREE_NODE_HEADER_SIZE + (Slot.LENGTH * 2 + 8) * BTREE_SLOT_COUNT;
 
 export enum WriteMode {
   READ_ONLY,
@@ -256,6 +261,66 @@ export class BTreeSplitResult {
   constructor(public left: number, public right: number) {}
 }
 
+// sorted_map / sorted_set: a count-augmented B+tree keyed on arbitrary byte strings,
+// ordered lexicographically. reuses the b-tree's capacity constants, persistence model
+// (txStart reuse), KeyValuePair entries, and the BTreeHeader {rootPtr, size} header. a
+// leaf holds .kv_pair entries in ascending key order; a branch holds child slots,
+// separator slots (the smallest key in each child's subtree; separators[0] is an unused
+// sentinel), and per-child subtree counts.
+export class SortedNode {
+  entries: Slot[] = new Array(BTREE_SLOT_COUNT); // leaf
+  children: Slot[] = new Array(BTREE_SLOT_COUNT); // branch
+  separators: Slot[] = new Array(BTREE_SLOT_COUNT); // branch
+  counts: number[] = new Array(BTREE_SLOT_COUNT).fill(0); // branch
+
+  constructor(public kind: BTreeNodeKind, public num: number) {
+    for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
+      this.entries[i] = new Slot();
+      this.children[i] = new Slot();
+      this.separators[i] = new Slot();
+    }
+  }
+
+  subtreeCount(): number {
+    if (this.kind === BTreeNodeKind.LEAF) return this.num;
+    let total = 0;
+    for (let i = 0; i < this.num; i++) total += this.counts[i];
+    return total;
+  }
+}
+
+// the new right sibling produced when a node splits
+export class SortedSplit {
+  constructor(public nodePtr: number, public count: number, public separator: Slot) {}
+}
+
+// insert/replace result: where to write the value, whether a new entry was added (vs
+// replacing), and the new right sibling if this node split
+export class SortedInsertResult {
+  constructor(
+    public nodePtr: number,
+    public count: number,
+    public valuePosition: number,
+    public added: boolean,
+    public split: SortedSplit | null
+  ) {}
+}
+
+// remove result threaded back up the descent: the rewritten node and whether the key
+// was found. separators are stable lower-bound boundaries (not exact mins), so
+// deletions never refresh them; an emptied leaf is left in place.
+export class SortedRemoveResult {
+  constructor(public nodePtr: number, public found: boolean) {}
+}
+
+export class SortedSlot {
+  constructor(public slot: Slot, public position: number) {}
+}
+
+export class SortedEntry {
+  constructor(public kvSlot: Slot, public keySlot: Slot, public valuePosition: number) {}
+}
+
 // PathPart types (discriminated union)
 export type PathPart =
   | ArrayListInit
@@ -272,6 +337,10 @@ export type PathPart =
   | HashMapInit
   | HashMapGet
   | HashMapRemove
+  | SortedMapInit
+  | SortedMapGet
+  | SortedMapGetIndex
+  | SortedMapRemove
   | WriteData
   | Context;
 
@@ -302,6 +371,24 @@ export class HashMapGetKey {
 export class HashMapGetValue {
   readonly kind = 'value';
   constructor(public hash: Uint8Array) {}
+}
+
+// SortedMapGetTarget types (the key is byte string, not a hash)
+export type SortedMapGetTarget = SortedMapGetKVPair | SortedMapGetKey | SortedMapGetValue;
+
+export class SortedMapGetKVPair {
+  readonly kind = 'kv_pair';
+  constructor(public key: Uint8Array) {}
+}
+
+export class SortedMapGetKey {
+  readonly kind = 'key';
+  constructor(public key: Uint8Array) {}
+}
+
+export class SortedMapGetValue {
+  readonly kind = 'value';
+  constructor(public key: Uint8Array) {}
 }
 
 // ContextFunction type
@@ -1069,6 +1156,202 @@ export class HashMapRemove implements PathPartBase {
   }
 }
 
+export class SortedMapInit implements PathPartBase {
+  readonly kind = 'SortedMapInit';
+  constructor(public set: boolean = false) {}
+
+  readSlotPointer(
+    db: Database,
+    isTopLevel: boolean,
+    writeMode: WriteMode,
+    path: PathPart[],
+    pathI: number,
+    slotPtr: SlotPointer
+  ): SlotPointer {
+    if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
+    if (isTopLevel) throw new InvalidTopLevelTypeException();
+    if (slotPtr.position === null) throw new CursorNotWriteableException();
+    const position = slotPtr.position;
+    const tag = this.set ? Tag.SORTED_SET : Tag.SORTED_MAP;
+    const writer = db.core.writer();
+    switch (slotPtr.slot.tag) {
+      case Tag.NONE: {
+        const rootPtr = db.writeSortedNode(new SortedNode(BTreeNodeKind.LEAF, 0));
+        const headerPtr = db.core.length();
+        db.core.seek(headerPtr);
+        writer.write(new BTreeHeader(rootPtr, 0).toBytes());
+        const nextSlotPtr = new SlotPointer(position, new Slot(headerPtr, tag));
+        db.core.seek(position);
+        writer.write(nextSlotPtr.slot.toBytes());
+        return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr);
+      }
+      case Tag.SORTED_MAP:
+      case Tag.SORTED_SET: {
+        if (slotPtr.slot.tag !== tag) throw new UnexpectedTagException();
+        let headerPtr = Number(slotPtr.slot.value);
+        // copy the header into this transaction unless it was made in it
+        if (db.txStart !== null) {
+          if (headerPtr < db.txStart) {
+            const reader = db.core.reader();
+            db.core.seek(headerPtr);
+            const headerBytes = new Uint8Array(BTreeHeader.LENGTH);
+            reader.readFully(headerBytes);
+            headerPtr = db.core.length();
+            db.core.seek(headerPtr);
+            writer.write(headerBytes);
+          }
+        } else if (db.header.tag === Tag.ARRAY_LIST) {
+          throw new ExpectedTxStartException();
+        }
+        const nextSlotPtr = new SlotPointer(position, new Slot(headerPtr, tag));
+        db.core.seek(position);
+        writer.write(nextSlotPtr.slot.toBytes());
+        return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr);
+      }
+      default:
+        throw new UnexpectedTagException();
+    }
+  }
+}
+
+export class SortedMapGet implements PathPartBase {
+  readonly kind = 'SortedMapGet';
+  constructor(public target: SortedMapGetTarget) {}
+
+  readSlotPointer(
+    db: Database,
+    isTopLevel: boolean,
+    writeMode: WriteMode,
+    path: PathPart[],
+    pathI: number,
+    slotPtr: SlotPointer
+  ): SlotPointer {
+    switch (slotPtr.slot.tag) {
+      case Tag.NONE:
+        throw new KeyNotFoundException();
+      case Tag.SORTED_MAP:
+      case Tag.SORTED_SET:
+        break;
+      default:
+        throw new UnexpectedTagException();
+    }
+
+    const key = this.target.key;
+
+    const headerPtr = Number(slotPtr.slot.value);
+    const reader = db.core.reader();
+    db.core.seek(headerPtr);
+    const headerBytes = new Uint8Array(BTreeHeader.LENGTH);
+    reader.readFully(headerBytes);
+    const header = BTreeHeader.fromBytes(headerBytes);
+
+    if (writeMode === WriteMode.READ_ONLY) {
+      const found = db.sortedGet(header.rootPtr, key);
+      if (found === null) throw new KeyNotFoundException();
+      const targetSlot = db.sortedTargetSlot(Number(found.slot.value), this.target);
+      return db.readSlotPointer(writeMode, path, pathI + 1, targetSlot);
+    } else {
+      const result = db.sortedPut(header.rootPtr, key);
+      const newRootPtr = db.sortedGrowRoot(result);
+      const kvPos = result.valuePosition - db.header.hashSize - Slot.LENGTH;
+      const targetSlot = db.sortedTargetSlot(kvPos, this.target);
+      const finalSlotPtr = db.readSlotPointer(writeMode, path, pathI + 1, targetSlot);
+
+      const writer = db.core.writer();
+      db.core.seek(headerPtr);
+      writer.write(new BTreeHeader(newRootPtr, header.size + (result.added ? 1 : 0)).toBytes());
+
+      return finalSlotPtr;
+    }
+  }
+}
+
+export class SortedMapGetIndex implements PathPartBase {
+  readonly kind = 'SortedMapGetIndex';
+  constructor(public index: number) {}
+
+  readSlotPointer(
+    db: Database,
+    isTopLevel: boolean,
+    writeMode: WriteMode,
+    path: PathPart[],
+    pathI: number,
+    slotPtr: SlotPointer
+  ): SlotPointer {
+    if (writeMode === WriteMode.READ_WRITE) throw new WriteNotAllowedException();
+
+    switch (slotPtr.slot.tag) {
+      case Tag.NONE:
+        throw new KeyNotFoundException();
+      case Tag.SORTED_MAP:
+      case Tag.SORTED_SET:
+        break;
+      default:
+        throw new UnexpectedTagException();
+    }
+
+    const headerPtr = Number(slotPtr.slot.value);
+    const reader = db.core.reader();
+    db.core.seek(headerPtr);
+    const headerBytes = new Uint8Array(BTreeHeader.LENGTH);
+    reader.readFully(headerBytes);
+    const header = BTreeHeader.fromBytes(headerBytes);
+
+    const index = this.index;
+    if (index >= header.size || index < -header.size) {
+      throw new KeyNotFoundException();
+    }
+    const rank = index < 0 ? header.size - Math.abs(index) : index;
+
+    const found = db.sortedGetByIndex(header.rootPtr, rank);
+    // return the kv_pair entry so the caller can read key and value
+    const targetSlot = new SlotPointer(found.position, found.slot);
+    return db.readSlotPointer(writeMode, path, pathI + 1, targetSlot);
+  }
+}
+
+export class SortedMapRemove implements PathPartBase {
+  readonly kind = 'SortedMapRemove';
+  constructor(public key: Uint8Array) {}
+
+  readSlotPointer(
+    db: Database,
+    isTopLevel: boolean,
+    writeMode: WriteMode,
+    path: PathPart[],
+    pathI: number,
+    slotPtr: SlotPointer
+  ): SlotPointer {
+    if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
+
+    switch (slotPtr.slot.tag) {
+      case Tag.NONE:
+        throw new KeyNotFoundException();
+      case Tag.SORTED_MAP:
+      case Tag.SORTED_SET:
+        break;
+      default:
+        throw new UnexpectedTagException();
+    }
+
+    const headerPtr = Number(slotPtr.slot.value);
+    const reader = db.core.reader();
+    db.core.seek(headerPtr);
+    const headerBytes = new Uint8Array(BTreeHeader.LENGTH);
+    reader.readFully(headerBytes);
+    const header = BTreeHeader.fromBytes(headerBytes);
+
+    const result = db.sortedRemove(header.rootPtr, this.key);
+    if (!result.found) throw new KeyNotFoundException();
+
+    const writer = db.core.writer();
+    db.core.seek(headerPtr);
+    writer.write(new BTreeHeader(result.nodePtr, header.size - 1).toBytes());
+
+    return slotPtr;
+  }
+}
+
 export class WriteData implements PathPartBase {
   readonly kind = 'WriteData';
   constructor(public data: WriteableData | null) {}
@@ -1191,6 +1474,15 @@ function checkLong(n: number): number {
     throw new ExpectedUnsignedLongException();
   }
   return n;
+}
+
+// lexicographic comparison of two byte strings (unsigned), returns <0, 0, or >0
+function compareBytesUnsigned(a: Uint8Array, b: Uint8Array): number {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+  }
+  return a.length === b.length ? 0 : a.length < b.length ? -1 : 1;
 }
 
 function bigIntShiftRight(value: Uint8Array, bits: number): bigint {
@@ -2222,6 +2514,449 @@ export class Database {
     }
     throw new UnreachableException();
   }
+
+  // sorted_map / sorted_set
+
+  readSortedNode(ptr: number): SortedNode {
+    this.core.seek(ptr);
+    const reader = this.core.reader();
+    const headerBytes = new Uint8Array(BTREE_NODE_HEADER_SIZE);
+    reader.readFully(headerBytes);
+    const kindInt = headerBytes[0];
+    if (kindInt > BTreeNodeKind.BRANCH) throw new InvalidBTreeNodeKindException();
+    const kind = kindInt as BTreeNodeKind;
+    const num = headerBytes[1];
+    if (num > BTREE_SLOT_COUNT) throw new InvalidBTreeNodeException();
+    const node = new SortedNode(kind, num);
+    switch (kind) {
+      case BTreeNodeKind.LEAF: {
+        const body = new Uint8Array(Slot.LENGTH * BTREE_SLOT_COUNT);
+        reader.readFully(body);
+        for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
+          node.entries[i] = Slot.fromBytes(body.slice(i * Slot.LENGTH, i * Slot.LENGTH + Slot.LENGTH));
+        }
+        break;
+      }
+      case BTreeNodeKind.BRANCH: {
+        const body = new Uint8Array((Slot.LENGTH * 2 + 8) * BTREE_SLOT_COUNT);
+        reader.readFully(body);
+        for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
+          node.children[i] = Slot.fromBytes(body.slice(i * Slot.LENGTH, i * Slot.LENGTH + Slot.LENGTH));
+        }
+        const sepOffset = Slot.LENGTH * BTREE_SLOT_COUNT;
+        for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
+          node.separators[i] = Slot.fromBytes(body.slice(sepOffset + i * Slot.LENGTH, sepOffset + i * Slot.LENGTH + Slot.LENGTH));
+        }
+        const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
+        const countsOffset = Slot.LENGTH * 2 * BTREE_SLOT_COUNT;
+        for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
+          node.counts[i] = Number(view.getBigInt64(countsOffset + i * 8, false));
+        }
+        break;
+      }
+    }
+    return node;
+  }
+
+  writeSortedNodeAt(node: SortedNode, ptr: number): void {
+    this.core.seek(ptr);
+    const writer = this.core.writer();
+    const bodySize = node.kind === BTreeNodeKind.LEAF ? SORTED_LEAF_BLOCK_SIZE : SORTED_BRANCH_BLOCK_SIZE;
+    const buffer = new Uint8Array(bodySize);
+    buffer[0] = node.kind;
+    buffer[1] = node.num;
+    let off = BTREE_NODE_HEADER_SIZE;
+    switch (node.kind) {
+      case BTreeNodeKind.LEAF:
+        for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
+          buffer.set(node.entries[i].toBytes(), off);
+          off += Slot.LENGTH;
+        }
+        break;
+      case BTreeNodeKind.BRANCH: {
+        for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
+          buffer.set(node.children[i].toBytes(), off);
+          off += Slot.LENGTH;
+        }
+        for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
+          buffer.set(node.separators[i].toBytes(), off);
+          off += Slot.LENGTH;
+        }
+        const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+        for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
+          view.setBigInt64(off, BigInt(node.counts[i]), false);
+          off += 8;
+        }
+        break;
+      }
+    }
+    writer.write(buffer);
+  }
+
+  writeSortedNode(node: SortedNode): number {
+    const ptr = this.core.length();
+    this.writeSortedNodeAt(node, ptr);
+    return ptr;
+  }
+
+  // reuse oldPtr's position in place when it belongs to this transaction
+  // (mirrors btreeWriteNode / the txStart path-copying model)
+  sortedWriteNode(node: SortedNode, oldPtr: number): number {
+    if (this.btreeReusable(oldPtr)) {
+      this.writeSortedNodeAt(node, oldPtr);
+      return oldPtr;
+    }
+    return this.writeSortedNode(node);
+  }
+
+  readKvPair(kvSlot: Slot): KeyValuePair {
+    if (kvSlot.tag !== Tag.KV_PAIR) throw new UnexpectedTagException();
+    this.core.seek(Number(kvSlot.value));
+    const reader = this.core.reader();
+    const bytes = new Uint8Array(KeyValuePair.length(this.header.hashSize));
+    reader.readFully(bytes);
+    return KeyValuePair.fromBytes(bytes, this.header.hashSize);
+  }
+
+  // lexicographic comparison of the byte key stored at keySlot (a bytes or short_bytes
+  // slot) against the in-memory target. returns <0, 0, or >0. streams external bytes so
+  // keys of any length work without allocation.
+  compareKey(keySlot: Slot, target: Uint8Array): number {
+    switch (keySlot.tag) {
+      case Tag.SHORT_BYTES: {
+        const buf = new Uint8Array(8);
+        new DataView(buf.buffer).setBigInt64(0, keySlot.value, false);
+        const total = keySlot.full ? 6 : 8;
+        let len = total;
+        for (let i = 0; i < total; i++) {
+          if (buf[i] === 0) { len = i; break; }
+        }
+        return compareBytesUnsigned(buf.subarray(0, len), target);
+      }
+      case Tag.BYTES: {
+        const reader = this.core.reader();
+        this.core.seek(Number(keySlot.value));
+        const len = reader.readLong();
+        let i = 0;
+        while (i < len) {
+          const n = Math.min(256, len - i);
+          const chunk = new Uint8Array(n);
+          reader.readFully(chunk);
+          for (let j = 0; j < n; j++) {
+            const ti = i + j;
+            if (ti >= target.length) return 1; // stored has more, equal so far
+            const b = chunk[j];
+            const t = target[ti];
+            if (b < t) return -1;
+            if (b > t) return 1;
+          }
+          i += n;
+        }
+        return target.length > len ? -1 : 0;
+      }
+      default:
+        throw new UnexpectedTagException();
+    }
+  }
+
+  // descend by key to the matching leaf entry (the .kv_pair slot), or null
+  sortedGet(rootPtr: number, key: Uint8Array): SortedSlot | null {
+    let nodePtr = rootPtr;
+    while (true) {
+      const node = this.readSortedNode(nodePtr);
+      if (node.kind === BTreeNodeKind.LEAF) {
+        for (let i = 0; i < node.num; i++) {
+          const entry = node.entries[i];
+          const kv = this.readKvPair(entry);
+          const cmp = this.compareKey(kv.keySlot, key);
+          if (cmp === 0) return new SortedSlot(entry, nodePtr + BTREE_NODE_HEADER_SIZE + i * Slot.LENGTH);
+          if (cmp > 0) return null;
+        }
+        return null;
+      } else {
+        let i = 0;
+        while (i + 1 < node.num && this.compareKey(node.separators[i + 1], key) <= 0) i++;
+        nodePtr = Number(node.children[i].value);
+      }
+    }
+  }
+
+  // descend by rank to the leaf entry at the given 0-based index
+  sortedGetByIndex(rootPtr: number, rank: number): SortedSlot {
+    let nodePtr = rootPtr;
+    let rem = rank;
+    while (true) {
+      const node = this.readSortedNode(nodePtr);
+      if (node.kind === BTreeNodeKind.LEAF) {
+        const i = rem;
+        return new SortedSlot(node.entries[i], nodePtr + BTREE_NODE_HEADER_SIZE + i * Slot.LENGTH);
+      } else {
+        let i = 0;
+        while (i + 1 < node.num && rem >= node.counts[i]) {
+          rem -= node.counts[i];
+          i++;
+        }
+        nodePtr = Number(node.children[i].value);
+      }
+    }
+  }
+
+  // number of keys strictly less than key (the inverse of getByIndex)
+  sortedRank(rootPtr: number, key: Uint8Array): number {
+    let nodePtr = rootPtr;
+    let rank = 0;
+    while (true) {
+      const node = this.readSortedNode(nodePtr);
+      if (node.kind === BTreeNodeKind.LEAF) {
+        for (let i = 0; i < node.num; i++) {
+          const kv = this.readKvPair(node.entries[i]);
+          if (this.compareKey(kv.keySlot, key) < 0) rank += 1;
+          else break;
+        }
+        return rank;
+      } else {
+        let i = 0;
+        while (i + 1 < node.num && this.compareKey(node.separators[i + 1], key) <= 0) {
+          rank += node.counts[i];
+          i++;
+        }
+        nodePtr = Number(node.children[i].value);
+      }
+    }
+  }
+
+  // write a byte key as a short_bytes (inline, <=8 bytes, no interior zero) or external
+  // bytes slot
+  writeKey(key: Uint8Array): Slot {
+    let hasZero = false;
+    for (const b of key) {
+      if (b === 0) { hasZero = true; break; }
+    }
+    if (key.length <= 8 && !hasZero) {
+      const value = new Uint8Array(8);
+      value.set(key, 0);
+      const v = new DataView(value.buffer).getBigInt64(0, false);
+      return new Slot(v, Tag.SHORT_BYTES);
+    }
+    const writer = this.core.writer();
+    const pos = this.core.length();
+    this.core.seek(pos);
+    writer.writeLong(key.length);
+    writer.write(key);
+    return new Slot(pos, Tag.BYTES);
+  }
+
+  // materialize a new leaf entry: write the key bytes and a KeyValuePair with an empty
+  // value (the caller fills it via valuePosition). the hash field is unused by sorted
+  // maps (navigation is by key bytes), so it is left zero.
+  sortedNewEntry(key: Uint8Array): SortedEntry {
+    const keySlot = this.writeKey(key);
+    const writer = this.core.writer();
+    const kvPos = this.core.length();
+    const kvPair = new KeyValuePair(new Slot(), keySlot, new Uint8Array(this.header.hashSize));
+    this.core.seek(kvPos);
+    writer.write(kvPair.toBytes());
+    return new SortedEntry(new Slot(kvPos, Tag.KV_PAIR), keySlot, kvPos + this.header.hashSize + Slot.LENGTH);
+  }
+
+  // insert key (or locate it for replacement) within the subtree at nodePtr,
+  // path-copying nodes and maintaining separators + counts. the caller writes the value
+  // at the returned valuePosition.
+  sortedPut(nodePtr: number, key: Uint8Array): SortedInsertResult {
+    const node = this.readSortedNode(nodePtr);
+    const writer = this.core.writer();
+    switch (node.kind) {
+      case BTreeNodeKind.LEAF: {
+        // find the matching or insertion index
+        let idx = node.num;
+        let found = false;
+        for (let i = 0; i < node.num; i++) {
+          const kv = this.readKvPair(node.entries[i]);
+          const cmp = this.compareKey(kv.keySlot, key);
+          if (cmp === 0) { idx = i; found = true; break; }
+          if (cmp > 0) { idx = i; break; }
+        }
+
+        if (found) {
+          // replace: return a writable value slot, copy-on-writing the kv_pair if it
+          // belongs to a past moment
+          const leaf = node;
+          const kvSlot = node.entries[idx];
+          let valuePosition: number;
+          if (this.btreeReusable(Number(kvSlot.value))) {
+            valuePosition = Number(kvSlot.value) + this.header.hashSize + Slot.LENGTH;
+          } else {
+            const kv = this.readKvPair(kvSlot);
+            const newKvPos = this.core.length();
+            this.core.seek(newKvPos);
+            writer.write(kv.toBytes());
+            leaf.entries[idx] = new Slot(newKvPos, Tag.KV_PAIR);
+            valuePosition = newKvPos + this.header.hashSize + Slot.LENGTH;
+          }
+          const ptr = this.sortedWriteNode(leaf, nodePtr);
+          return new SortedInsertResult(ptr, node.num, valuePosition, false, null);
+        }
+
+        // insert a new entry at idx
+        const entry = this.sortedNewEntry(key);
+        const entries: Slot[] = [];
+        for (let k = 0; k < idx; k++) entries.push(node.entries[k]);
+        entries.push(entry.kvSlot);
+        for (let k = idx; k < node.num; k++) entries.push(node.entries[k]);
+        const total = node.num + 1;
+
+        if (total <= BTREE_SLOT_COUNT) {
+          const leaf = new SortedNode(BTreeNodeKind.LEAF, total);
+          for (let k = 0; k < total; k++) leaf.entries[k] = entries[k];
+          const ptr = this.sortedWriteNode(leaf, nodePtr);
+          return new SortedInsertResult(ptr, total, entry.valuePosition, true, null);
+        }
+
+        // overflow: split into two leaves; the new sibling's separator is the key of its
+        // first entry
+        const leftN = BTREE_SPLIT_COUNT;
+        const rightN = total - leftN;
+        const left = new SortedNode(BTreeNodeKind.LEAF, leftN);
+        for (let k = 0; k < leftN; k++) left.entries[k] = entries[k];
+        const right = new SortedNode(BTreeNodeKind.LEAF, rightN);
+        for (let k = 0; k < rightN; k++) right.entries[k] = entries[leftN + k];
+        const separator = this.readKvPair(entries[leftN]).keySlot;
+        const leftPtr = this.sortedWriteNode(left, nodePtr);
+        const rightPtr = this.writeSortedNode(right);
+        return new SortedInsertResult(leftPtr, leftN, entry.valuePosition, true, new SortedSplit(rightPtr, rightN, separator));
+      }
+      case BTreeNodeKind.BRANCH: {
+        let i = 0;
+        while (i + 1 < node.num && this.compareKey(node.separators[i + 1], key) <= 0) i++;
+        const child = this.sortedPut(Number(node.children[i].value), key);
+
+        const children: Slot[] = [];
+        const separators: Slot[] = [];
+        const counts: number[] = [];
+        for (let k = 0; k < node.num; k++) {
+          children.push(node.children[k]);
+          separators.push(node.separators[k]);
+          counts.push(node.counts[k]);
+        }
+        children[i] = new Slot(child.nodePtr, Tag.INDEX);
+        counts[i] = child.count;
+        let total = node.num;
+        if (child.split !== null) {
+          children.splice(i + 1, 0, new Slot(child.split.nodePtr, Tag.INDEX));
+          separators.splice(i + 1, 0, child.split.separator);
+          counts.splice(i + 1, 0, child.split.count);
+          total = node.num + 1;
+        }
+
+        if (total <= BTREE_SLOT_COUNT) {
+          const branch = new SortedNode(BTreeNodeKind.BRANCH, total);
+          for (let k = 0; k < total; k++) {
+            branch.children[k] = children[k];
+            branch.separators[k] = separators[k];
+            branch.counts[k] = counts[k];
+          }
+          const ptr = this.sortedWriteNode(branch, nodePtr);
+          return new SortedInsertResult(ptr, branch.subtreeCount(), child.valuePosition, child.added, null);
+        }
+
+        // overflow: split into two branches; the new sibling's separator is the smallest
+        // key of its first child (separators[leftN] of the combined)
+        const leftN = BTREE_SPLIT_COUNT;
+        const rightN = total - leftN;
+        const left = new SortedNode(BTreeNodeKind.BRANCH, leftN);
+        for (let k = 0; k < leftN; k++) {
+          left.children[k] = children[k];
+          left.separators[k] = separators[k];
+          left.counts[k] = counts[k];
+        }
+        const right = new SortedNode(BTreeNodeKind.BRANCH, rightN);
+        for (let k = 0; k < rightN; k++) {
+          right.children[k] = children[leftN + k];
+          right.separators[k] = separators[leftN + k];
+          right.counts[k] = counts[leftN + k];
+        }
+        const separator = separators[leftN];
+        const leftPtr = this.sortedWriteNode(left, nodePtr);
+        const rightPtr = this.writeSortedNode(right);
+        return new SortedInsertResult(
+          leftPtr,
+          left.subtreeCount(),
+          child.valuePosition,
+          child.added,
+          new SortedSplit(rightPtr, right.subtreeCount(), separator)
+        );
+      }
+    }
+    throw new UnreachableException();
+  }
+
+  // remove key from the subtree at nodePtr, path-copying nodes and decrementing counts.
+  // an emptied leaf is left in place (see SortedRemoveResult).
+  sortedRemove(nodePtr: number, key: Uint8Array): SortedRemoveResult {
+    const node = this.readSortedNode(nodePtr);
+    switch (node.kind) {
+      case BTreeNodeKind.LEAF: {
+        let idx = node.num;
+        let found = false;
+        for (let i = 0; i < node.num; i++) {
+          const kv = this.readKvPair(node.entries[i]);
+          const cmp = this.compareKey(kv.keySlot, key);
+          if (cmp === 0) { idx = i; found = true; break; }
+          if (cmp > 0) break;
+        }
+        if (!found) return new SortedRemoveResult(nodePtr, false);
+
+        const leaf = new SortedNode(BTreeNodeKind.LEAF, node.num - 1);
+        for (let k = 0; k < idx; k++) leaf.entries[k] = node.entries[k];
+        for (let k = idx; k < node.num - 1; k++) leaf.entries[k] = node.entries[k + 1];
+        const ptr = this.sortedWriteNode(leaf, nodePtr);
+        return new SortedRemoveResult(ptr, true);
+      }
+      case BTreeNodeKind.BRANCH: {
+        let i = 0;
+        while (i + 1 < node.num && this.compareKey(node.separators[i + 1], key) <= 0) i++;
+        const child = this.sortedRemove(Number(node.children[i].value), key);
+        if (!child.found) return new SortedRemoveResult(nodePtr, false);
+
+        const branch = node;
+        branch.children[i] = new Slot(child.nodePtr, Tag.INDEX);
+        branch.counts[i] -= 1;
+        const ptr = this.sortedWriteNode(branch, nodePtr);
+        return new SortedRemoveResult(ptr, true);
+      }
+    }
+    throw new UnreachableException();
+  }
+
+  sortedGrowRoot(result: SortedInsertResult): number {
+    if (result.split !== null) {
+      const split = result.split;
+      const root = new SortedNode(BTreeNodeKind.BRANCH, 2);
+      root.children[0] = new Slot(result.nodePtr, Tag.INDEX);
+      root.children[1] = new Slot(split.nodePtr, Tag.INDEX);
+      root.separators[1] = split.separator; // separators[0] is an unused sentinel
+      root.counts[0] = result.count;
+      root.counts[1] = split.count;
+      return this.writeSortedNode(root);
+    }
+    return result.nodePtr;
+  }
+
+  // turn a located/inserted kv_pair (at kvPos) into the slot for the requested target.
+  // only the value is writeable (that is how put works); the key and the kv_pair pointer
+  // are immutable, so they are returned with no writeable position.
+  sortedTargetSlot(kvPos: number, target: SortedMapGetTarget): SlotPointer {
+    const kv = this.readKvPair(new Slot(kvPos, Tag.KV_PAIR));
+    if (target instanceof SortedMapGetKVPair) {
+      return new SlotPointer(null, new Slot(kvPos, Tag.KV_PAIR));
+    } else if (target instanceof SortedMapGetKey) {
+      return new SlotPointer(null, kv.keySlot);
+    } else if (target instanceof SortedMapGetValue) {
+      return new SlotPointer(kvPos + this.header.hashSize + Slot.LENGTH, kv.valueSlot);
+    } else {
+      throw new UnexpectedTagException();
+    }
+  }
 }
 
 // compaction helpers
@@ -2288,6 +3023,14 @@ function remapSlot(
       const mapped = offsetMap.get(Number(slot.value));
       if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
       const newOffset = remapKvPair(sourceCore, targetCore, hashSize, offsetMap, slot);
+      offsetMap.set(Number(slot.value), newOffset);
+      return new Slot(newOffset, slot.tag, slot.full);
+    }
+    case Tag.SORTED_MAP:
+    case Tag.SORTED_SET: {
+      const mapped = offsetMap.get(Number(slot.value));
+      if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
+      const newOffset = remapSortedMap(sourceCore, targetCore, hashSize, offsetMap, slot);
       offsetMap.set(Number(slot.value), newOffset);
       return new Slot(newOffset, slot.tag, slot.full);
     }
@@ -2471,6 +3214,110 @@ function remapBTreeNode(
       const targetWriter = targetCore.writer();
       targetWriter.write(new Uint8Array([kindInt, num]));
       for (const s of children) targetWriter.write(s.toBytes());
+      for (const c of counts) targetWriter.writeLong(c);
+
+      offsetMap.set(nodeOffset, newOffset);
+      return newOffset;
+    }
+  }
+  throw new UnreachableException();
+}
+
+function remapSortedMap(
+  sourceCore: Core,
+  targetCore: Core,
+  hashSize: number,
+  offsetMap: Map<number, number>,
+  slot: Slot
+): number {
+  sourceCore.seek(Number(slot.value));
+  const sourceReader = sourceCore.reader();
+  const headerBytes = new Uint8Array(BTreeHeader.LENGTH);
+  sourceReader.readFully(headerBytes);
+  const header = BTreeHeader.fromBytes(headerBytes);
+
+  const remappedRoot = remapSortedMapNode(sourceCore, targetCore, hashSize, offsetMap, header.rootPtr);
+
+  const newOffset = targetCore.length();
+  targetCore.seek(newOffset);
+  const targetWriter = targetCore.writer();
+  targetWriter.write(new BTreeHeader(remappedRoot, header.size).toBytes());
+
+  return newOffset;
+}
+
+function remapSortedMapNode(
+  sourceCore: Core,
+  targetCore: Core,
+  hashSize: number,
+  offsetMap: Map<number, number>,
+  nodeOffset: number
+): number {
+  const mapped = offsetMap.get(nodeOffset);
+  if (mapped !== undefined) return mapped;
+
+  sourceCore.seek(nodeOffset);
+  const sourceReader = sourceCore.reader();
+  const nodeHeader = new Uint8Array(BTREE_NODE_HEADER_SIZE);
+  sourceReader.readFully(nodeHeader);
+  const kindInt = nodeHeader[0];
+  if (kindInt > BTreeNodeKind.BRANCH) throw new InvalidBTreeNodeKindException();
+  const kind = kindInt as BTreeNodeKind;
+  const num = nodeHeader[1];
+
+  switch (kind) {
+    case BTreeNodeKind.LEAF: {
+      const body = new Uint8Array(Slot.LENGTH * BTREE_SLOT_COUNT);
+      sourceReader.readFully(body);
+
+      const entries: Slot[] = [];
+      for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
+        const entry = Slot.fromBytes(body.slice(i * Slot.LENGTH, i * Slot.LENGTH + Slot.LENGTH));
+        entries.push(remapSlot(sourceCore, targetCore, hashSize, offsetMap, entry));
+      }
+
+      const newOffset = targetCore.length();
+      targetCore.seek(newOffset);
+      const targetWriter = targetCore.writer();
+      targetWriter.write(new Uint8Array([kindInt, num]));
+      for (const s of entries) targetWriter.write(s.toBytes());
+
+      offsetMap.set(nodeOffset, newOffset);
+      return newOffset;
+    }
+    case BTreeNodeKind.BRANCH: {
+      const body = new Uint8Array((Slot.LENGTH * 2 + 8) * BTREE_SLOT_COUNT);
+      sourceReader.readFully(body);
+      const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
+
+      const children: Slot[] = [];
+      for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
+        const child = Slot.fromBytes(body.slice(i * Slot.LENGTH, i * Slot.LENGTH + Slot.LENGTH));
+        if (child.tag === Tag.INDEX) {
+          const remappedPtr = remapSortedMapNode(sourceCore, targetCore, hashSize, offsetMap, Number(child.value));
+          children.push(new Slot(remappedPtr, Tag.INDEX, child.full));
+        } else {
+          children.push(child);
+        }
+      }
+      const sepOffset = Slot.LENGTH * BTREE_SLOT_COUNT;
+      const separators: Slot[] = [];
+      for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
+        const sep = Slot.fromBytes(body.slice(sepOffset + i * Slot.LENGTH, sepOffset + i * Slot.LENGTH + Slot.LENGTH));
+        separators.push(remapSlot(sourceCore, targetCore, hashSize, offsetMap, sep));
+      }
+      const countsOffset = Slot.LENGTH * 2 * BTREE_SLOT_COUNT;
+      const counts: number[] = [];
+      for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
+        counts.push(Number(view.getBigInt64(countsOffset + i * 8, false)));
+      }
+
+      const newOffset = targetCore.length();
+      targetCore.seek(newOffset);
+      const targetWriter = targetCore.writer();
+      targetWriter.write(new Uint8Array([kindInt, num]));
+      for (const s of children) targetWriter.write(s.toBytes());
+      for (const s of separators) targetWriter.write(s.toBytes());
       for (const c of counts) targetWriter.writeLong(c);
 
       offsetMap.set(nodeOffset, newOffset);
