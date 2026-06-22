@@ -46,6 +46,16 @@ import { mkdtempSync, rmSync } from 'fs';
 
 const MAX_READ_BYTES = 1024;
 
+// build a SortedMap key that sorts by creation time. the big-endian
+// timestamp makes byte order match chronological order; the post id is
+// appended so two posts with the same timestamp still get distinct keys.
+function orderKey(timestamp: number, postId: Uint8Array): Uint8Array {
+  const key = new Uint8Array(8 + postId.length);
+  new DataView(key.buffer).setBigUint64(0, BigInt(timestamp), false); // false = big-endian
+  key.set(postId, 8);
+  return key;
+}
+
 describe('High Level API', () => {
   test('in-memory storage', () => {
     const core = new CoreMemory();
@@ -829,6 +839,89 @@ function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null): 
     const bigCitiesCursor = moment.getCursor('big-cities');
     const bigCities = new ReadArrayList(bigCitiesCursor!);
     assert.strictEqual(bigCities.count(), 2);
+  }
+
+  // build a secondary index with a SortedMap to sort and paginate,
+  // like the "Sorting and Paginating" section of the readme
+  {
+    const history = new WriteArrayList(db.rootCursor());
+
+    interface Post {
+      id: string;
+      title: string;
+      createdTs: number;
+    }
+
+    // post ids are fixed-length so the timestamp tie-breaker stays aligned
+    const newPosts: Post[] = [
+      { id: 'post000000000001', title: 'Hello, world', createdTs: 1_700_000_000 },
+      { id: 'post000000000002', title: 'Second post', createdTs: 1_700_000_500 },
+      { id: 'post000000000003', title: 'Third post', createdTs: 1_700_001_000 },
+    ];
+
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+
+    history.appendContext(history.getSlot(-1), (cursor) => {
+      const moment = new WriteHashMap(cursor);
+
+      // the primary store: a HashMap from post id to the post's fields
+      const idToPostCursor = moment.putCursor('id->post');
+      const idToPost = new WriteHashMap(idToPostCursor);
+
+      // the secondary index: a SortedMap ordered by creation time
+      const createdTsToPostIdCursor = moment.putCursor('created-ts->post-id');
+      const createdTsToPostId = new WriteSortedMap(createdTsToPostIdCursor);
+
+      for (const post of newPosts) {
+        const postCursor = idToPost.putCursor(post.id);
+        const postMap = new WriteHashMap(postCursor);
+        postMap.put('title', new Bytes(post.title));
+        postMap.put('created-ts', new Uint(post.createdTs));
+
+        const orderKeyBytes = orderKey(post.createdTs, encoder.encode(post.id));
+        createdTsToPostId.put(orderKeyBytes, new Bytes(post.id));
+      }
+    });
+
+    const momentCursor = history.getCursor(-1);
+    const moment = new ReadHashMap(momentCursor!);
+
+    const idToPostCursor = moment.getCursor('id->post');
+    const idToPost = new ReadHashMap(idToPostCursor!);
+
+    const createdTsToPostIdCursor = moment.getCursor('created-ts->post-id');
+    const createdTsToPostId = new ReadSortedMap(createdTsToPostIdCursor!);
+
+    assert.strictEqual(createdTsToPostId.count(), newPosts.length);
+
+    // page through the index two at a time, oldest first, and check we get
+    // every post back in creation order
+    const pageSize = 2;
+    const expectedTitles = ['Hello, world', 'Second post', 'Third post'];
+
+    const count = createdTsToPostId.count();
+    let seen = 0;
+    for (let after = 0; after < count; after += pageSize) {
+      const end = Math.min(after + pageSize, count);
+      const iter = createdTsToPostId.iteratorFromIndex(after);
+      for (let i = after; i < end && iter.hasNext(); i++) {
+        const idCursor = iter.next()!;
+        const idKv = idCursor.readKeyValuePair();
+
+        // the index entry's value is the post id; use it to read the
+        // full post out of the primary map
+        const postId = decoder.decode(idKv.valueCursor.readBytes(MAX_READ_BYTES));
+
+        const postCursor = idToPost.getCursor(postId);
+        const postMap = new ReadHashMap(postCursor!);
+        const titleCursor = postMap.getCursor('title');
+        const title = decoder.decode(titleCursor!.readBytes(MAX_READ_BYTES));
+        assert.strictEqual(title, expectedTitles[seen]);
+        seen += 1;
+      }
+    }
+    assert.strictEqual(seen, newPosts.length);
   }
 }
 
