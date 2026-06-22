@@ -26,6 +26,7 @@ This database was originally made for the [xit version control system](https://g
 * [Initializing a Database](#initializing-a-database)
 * [Types](#types)
 * [Cloning and Undoing](#cloning-and-undoing)
+* [Sorting and Paginating](#sorting-and-paginating)
 * [Large Byte Arrays](#large-byte-arrays)
 * [Iterators](#iterators)
 * [Hashing](#hashing)
@@ -287,6 +288,116 @@ const bigCities = new ReadArrayList(bigCitiesCursor!);
 assert.strictEqual(bigCities.count(), 2);
 ```
 
+## Sorting and Paginating
+
+The `Hash`-based structures are great for looking data up by key, but they store their contents in hash order, which is meaningless to a human. You may need to display data in a sensible order (like newest posts first or users by signup date) and show it one page at a time. Relational databases like SQLite have this built-in: you declare a `CREATE INDEX`, write `ORDER BY created_ts LIMIT 20 OFFSET 40`, and the query planner maintains the index and seeks into it for you.
+
+In xitdb there are no built-in indexes, so you build and maintain them yourself. That's a little more code, but the index is just another data structure: a `SortedMap` whose keys are crafted to sort the way you want. You keep it in sync by writing to it in the same transaction that writes the primary data.
+
+Let's model the storage a basic blog would need: a collection of posts we look up by id, plus a secondary index that lets us list them oldest-first with pagination. The primary store is a `HashMap` from post id to the post's fields (like a row keyed by its primary key). The secondary index is a `SortedMap` keyed by creation time, whose value is the post id to look up.
+
+The trick is the key. A `SortedMap` orders its keys lexicographically by their raw bytes, so we encode the timestamp as a big-endian integer (so byte order matches chronological order) and append the post id to break ties between posts created in the same second and keep every key unique:
+
+```typescript
+// build a SortedMap key that sorts by creation time. the big-endian
+// timestamp makes byte order match chronological order; the post id is
+// appended so two posts with the same timestamp still get distinct keys.
+function orderKey(timestamp: number, postId: Uint8Array): Uint8Array {
+  const key = new Uint8Array(8 + postId.length);
+  new DataView(key.buffer).setBigUint64(0, BigInt(timestamp), false); // false = big-endian
+  key.set(postId, 8);
+  return key;
+}
+```
+
+Now we write some posts. On each insert we write the post into the primary map and add an entry to the secondary index (keeping both in sync is your job, not the database's):
+
+```typescript
+interface Post {
+  id: string;
+  title: string;
+  createdTs: number;
+}
+
+// post ids are fixed-length so the timestamp tie-breaker stays aligned
+const newPosts: Post[] = [
+  { id: 'post000000000001', title: 'Hello, world', createdTs: 1_700_000_000 },
+  { id: 'post000000000002', title: 'Second post', createdTs: 1_700_000_500 },
+  { id: 'post000000000003', title: 'Third post', createdTs: 1_700_001_000 },
+];
+
+history.appendContext(history.getSlot(-1), (cursor) => {
+  const moment = new WriteHashMap(cursor);
+
+  // the primary store: a HashMap from post id to the post's fields
+  const idToPostCursor = moment.putCursor('id->post');
+  const idToPost = new WriteHashMap(idToPostCursor);
+
+  // the secondary index: a SortedMap ordered by creation time. there's
+  // no CREATE INDEX here, so we maintain it ourselves on every write.
+  const createdTsToPostIdCursor = moment.putCursor('created-ts->post-id');
+  const createdTsToPostId = new WriteSortedMap(createdTsToPostIdCursor);
+
+  for (const post of newPosts) {
+    // write the post into the primary map under its id
+    const postCursor = idToPost.putCursor(post.id);
+    const postMap = new WriteHashMap(postCursor);
+    postMap.put('title', new Bytes(post.title));
+    postMap.put('created-ts', new Uint(post.createdTs));
+
+    // add an entry to the secondary index. the key sorts by time,
+    // and the value is the post id we'll use to look the post back up.
+    const orderKeyBytes = orderKey(post.createdTs, new TextEncoder().encode(post.id));
+    createdTsToPostId.put(orderKeyBytes, new Bytes(post.id));
+  }
+});
+```
+
+To display a page, we walk the `SortedMap` instead of the `HashMap`. A web app would take a `pageSize` and an `after` offset from the request (something like `/posts?after=20`), so this is the xitdb equivalent of `ORDER BY created_ts LIMIT pageSize OFFSET after`:
+
+```typescript
+const momentCursor = history.getCursor(-1);
+const moment = new ReadHashMap(momentCursor!);
+
+const idToPostCursor = moment.getCursor('id->post');
+const idToPost = new ReadHashMap(idToPostCursor!);
+
+const createdTsToPostIdCursor = moment.getCursor('created-ts->post-id');
+const createdTsToPostId = new ReadSortedMap(createdTsToPostIdCursor!);
+
+// a web request would supply these; here we just grab the first page
+const pageSize = 2;
+const after = 0;
+
+const count = createdTsToPostId.count();
+const end = Math.min(after + pageSize, count);
+
+// seek straight to the start of the page, then walk forward one entry at a
+// time. because SortedMap is a count-augmented B+tree, iteratorFromIndex
+// finds rank `after` in O(log n) without scanning the entries it skips, so
+// jumping to page 500 is just as cheap as page 1.
+const decoder = new TextDecoder();
+const iter = createdTsToPostId.iteratorFromIndex(after);
+for (let i = after; i < end && iter.hasNext(); i++) {
+  const idCursor = iter.next()!;
+  const idKv = idCursor.readKeyValuePair();
+
+  // the index entry's value is the post id; use it to read the
+  // full post out of the primary map
+  const postId = decoder.decode(idKv.valueCursor.readBytes(MAX_READ_BYTES));
+
+  const postCursor = idToPost.getCursor(postId);
+  const postMap = new ReadHashMap(postCursor!);
+  const titleCursor = postMap.getCursor('title');
+  const title = decoder.decode(titleCursor!.readBytes(MAX_READ_BYTES));
+
+  // a real app would render this into the page's HTML
+  console.log(title);
+}
+```
+
+This works for any ordering you need: sort by a username with a string key, by score with a big-endian integer key, or build several `SortedMap` indexes over the same primary `HashMap` to offer the data in different orders. With xitdb you "bring your own index". It takes a bit more effort than the declarative convenience of SQL databases, but it gives you more explicit control, and avoids the common problem in SQL where queries silently become inefficient due to not using indexes. In xitdb, inefficiency is hard to miss because you are always writing your queries as imperative code and the indexes are always explicit.
+
 ## Large Byte Arrays
 
 When reading and writing large byte arrays, you probably don't want to have all of their contents in memory at once. To incrementally write to a byte array, just get a writer from a cursor:
@@ -360,6 +471,8 @@ while (peopleIter.hasNext()) {
 The above code iterates over `people`, which is an `ArrayList`, and for each person (which is a `HashMap`), it iterates over each of its key-value pairs.
 
 The iteration of the `HashMap` looks the same with `HashSet`, `CountedHashMap`, and `CountedHashSet`. When iterating, you call `readKeyValuePair` on the cursor and can read the `keyCursor` and `valueCursor` from it. In maps, `put` sets the key and value. In sets, `put` only sets the key; the value will always have a tag type of `NONE`.
+
+Unlike the other structures, `SortedMap` and `SortedSet` keep their keys in order, so besides `iterator` they also offer `iteratorFrom` and `iteratorFromIndex`, which start the iterator at an arbitrary point. `iteratorFrom` begins at the first key greater than or equal to the key you pass, while `iteratorFromIndex` begins at a given rank (the Nth key in order). This is especially useful for pagination: you can seek straight to the start of a page and walk forward only as far as you need. See the [Sorting and Paginating](#sorting-and-paginating) section for an example.
 
 ## Hashing
 
