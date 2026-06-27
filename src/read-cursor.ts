@@ -14,6 +14,7 @@ import {
   BTREE_NODE_HEADER_SIZE,
   BTreeNodeKind,
   SLOT_COUNT,
+  BIT_COUNT,
 } from './database.js';
 import {
   UnexpectedTagException,
@@ -385,19 +386,79 @@ export class CursorIterator {
     this.cursor = cursor;
   }
 
+  // resolve a possibly-negative start index against `size` to a 0-based rank.
+  // negatives count from the end (-1 is the last entry); anything out of range
+  // returns -1 (yield nothing).
+  private static resolveStartIndex(index: number, size: number): number {
+    const resolved = index < 0 ? index + size : index;
+    if (resolved < 0 || resolved >= size) return -1;
+    return resolved;
+  }
+
   // start a sorted-map iterator at the entry with rank startIndex (the count descent),
-  // iterating in key order from there
+  // iterating in key order from there. negative indexes count from the end.
   static initSortedFromIndex(cursor: ReadCursor, startIndex: number): CursorIterator {
-    const total = cursor.count();
     const it = new CursorIterator(cursor);
     // an unwritten map is NONE (like iterator()): yield nothing
-    if (cursor.slotPtr.slot.tag === Tag.NONE || startIndex >= total) {
+    if (cursor.slotPtr.slot.tag === Tag.NONE) {
+      return it;
+    }
+    const total = cursor.count();
+    const idx = CursorIterator.resolveStartIndex(startIndex, total);
+    if (idx < 0) {
       return it;
     }
     const rootPtr = CursorIterator.sortedRootPtr(cursor);
     it.size = total;
-    it.index = startIndex;
-    it.stack = CursorIterator.sortedStackFromIndex(cursor, rootPtr, startIndex);
+    it.index = idx;
+    it.stack = CursorIterator.sortedStackFromIndex(cursor, rootPtr, idx);
+    return it;
+  }
+
+  // start an array-list iterator at startIndex, descending the radix trie
+  // straight to that index. negatives count from the end; out of range (or an
+  // unwritten list) yields nothing.
+  static initArrayListFromIndex(cursor: ReadCursor, startIndex: number): CursorIterator {
+    const it = new CursorIterator(cursor);
+    if (cursor.slotPtr.slot.tag !== Tag.ARRAY_LIST) {
+      return it;
+    }
+    cursor.db.core.seek(Number(cursor.slotPtr.slot.value));
+    const reader = cursor.db.core.reader();
+    const headerBytes = new Uint8Array(ArrayListHeader.LENGTH);
+    reader.readFully(headerBytes);
+    const header = ArrayListHeader.fromBytes(headerBytes);
+    const idx = CursorIterator.resolveStartIndex(startIndex, header.size);
+    if (idx < 0) {
+      return it;
+    }
+    const lastKey = header.size - 1;
+    const shift = lastKey < SLOT_COUNT ? 0 : Math.floor(Math.log(lastKey) / Math.log(SLOT_COUNT));
+    it.size = header.size;
+    it.index = idx;
+    it.stack = CursorIterator.arrayListStackFromIndex(cursor, header.ptr, idx, shift);
+    return it;
+  }
+
+  // start a linked-array-list iterator at startIndex, descending the
+  // count-augmented b-tree straight to that index. negatives count from the end.
+  static initLinkedArrayListFromIndex(cursor: ReadCursor, startIndex: number): CursorIterator {
+    const it = new CursorIterator(cursor);
+    if (cursor.slotPtr.slot.tag !== Tag.LINKED_ARRAY_LIST) {
+      return it;
+    }
+    cursor.db.core.seek(Number(cursor.slotPtr.slot.value));
+    const reader = cursor.db.core.reader();
+    const headerBytes = new Uint8Array(BTreeHeader.LENGTH);
+    reader.readFully(headerBytes);
+    const header = BTreeHeader.fromBytes(headerBytes);
+    const idx = CursorIterator.resolveStartIndex(startIndex, header.size);
+    if (idx < 0) {
+      return it;
+    }
+    it.size = header.size;
+    it.index = idx;
+    it.stack = CursorIterator.btreeStackFromIndex(cursor, header.rootPtr, idx);
     return it;
   }
 
@@ -441,6 +502,49 @@ export class CursorIterator {
       const position = nodePtr + BTREE_NODE_HEADER_SIZE;
       if (node.kind === BTreeNodeKind.LEAF) {
         stack.push(new IteratorLevel(position, node.entries, rem));
+        return stack;
+      } else {
+        let i = 0;
+        while (i + 1 < node.num && rem >= node.counts[i]) {
+          rem -= node.counts[i];
+          i++;
+        }
+        stack.push(new IteratorLevel(position, node.children, i));
+        nodePtr = Number(node.children[i].value);
+      }
+    }
+  }
+
+  // descend the array-list radix trie to startIndex, pushing one IteratorLevel
+  // per tier with its index set to that tier's child slot. nextInternal then
+  // walks forward from there.
+  private static arrayListStackFromIndex(cursor: ReadCursor, rootPtr: number, startIndex: number, shift: number): IteratorLevel[] {
+    const stack: IteratorLevel[] = [];
+    let pos = rootPtr;
+    let sh = shift;
+    while (true) {
+      const block = CursorIterator.readSlotBlock(cursor, pos);
+      const i = (startIndex >>> (sh * BIT_COUNT)) & (SLOT_COUNT - 1);
+      stack.push(new IteratorLevel(pos, block, i));
+      if (sh === 0) return stack;
+      // every tier above the leaf is a populated INDEX slot for any
+      // startIndex < size, so this child always exists
+      pos = Number(block[i].value);
+      sh -= 1;
+    }
+  }
+
+  // descend the linked-array-list count b-tree to startIndex; the positional
+  // analog of sortedStackFromIndex (no separator keys).
+  private static btreeStackFromIndex(cursor: ReadCursor, rootPtr: number, startIndex: number): IteratorLevel[] {
+    const stack: IteratorLevel[] = [];
+    let nodePtr = rootPtr;
+    let rem = startIndex;
+    while (true) {
+      const node = cursor.db.readBTreeNode(nodePtr);
+      const position = nodePtr + BTREE_NODE_HEADER_SIZE;
+      if (node.kind === BTreeNodeKind.LEAF) {
+        stack.push(new IteratorLevel(position, node.values, rem));
         return stack;
       } else {
         let i = 0;
@@ -543,7 +647,7 @@ export class CursorIterator {
 
   // read a 16-slot index block (the iterable structures all use 9-byte slots in
   // their index/node blocks)
-  private readSlotBlock(cursor: ReadCursor, position: number): Slot[] {
+  static readSlotBlock(cursor: ReadCursor, position: number): Slot[] {
     cursor.db.core.seek(position);
     const reader = cursor.db.core.reader();
     const indexBlockBytes = new Uint8Array(INDEX_BLOCK_SIZE);
@@ -558,7 +662,7 @@ export class CursorIterator {
   }
 
   private initStack(cursor: ReadCursor, position: number): IteratorLevel[] {
-    return [new IteratorLevel(position, this.readSlotBlock(cursor, position), 0)];
+    return [new IteratorLevel(position, CursorIterator.readSlotBlock(cursor, position), 0)];
   }
 
   hasNext(): boolean {
@@ -630,7 +734,7 @@ export class CursorIterator {
         if (nextSlot.tag === Tag.INDEX) {
           // nodeOffset skips a b-tree node's kind+num header
           const nextPos = Number(nextSlot.value) + nodeOffset;
-          this.stack.push(new IteratorLevel(nextPos, this.readSlotBlock(this.cursor, nextPos), 0));
+          this.stack.push(new IteratorLevel(nextPos, CursorIterator.readSlotBlock(this.cursor, nextPos), 0));
           continue;
         } else {
           this.stack[this.stack.length - 1].index += 1;

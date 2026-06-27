@@ -35,6 +35,12 @@ export class ReadLinkedArrayList implements Slotted {
     return this.cursor.iterator();
   }
 
+  // iterate starting at the given index, seeking straight to it instead of
+  // walking from the front. negative indexes count from the end.
+  iteratorFrom(index: number): CursorIterator {
+    return CursorIterator.initLinkedArrayListFromIndex(this.cursor, index);
+  }
+
   *[Symbol.iterator](): Iterator<ReadCursor> {
     yield* this.cursor;
   }

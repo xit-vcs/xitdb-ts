@@ -1390,6 +1390,21 @@ function testSortedMap(core: Core, hasher: Hasher): void {
         const iter = map.iteratorFromIndex(COUNT - 2);
         assert.strictEqual(decoder.decode(iter.next()!.readKeyValuePair().keyCursor.readBytes(MAX_READ_BYTES)), 'k0058');
       }
+      // negative indexes count from the end: -1 is the last entry, -COUNT the first
+      {
+        const iter = map.iteratorFromIndex(-1);
+        assert.strictEqual(decoder.decode(iter.next()!.readKeyValuePair().keyCursor.readBytes(MAX_READ_BYTES)), 'k0059');
+        assert.ok(!iter.hasNext()); // -1 is the last entry, so nothing follows
+      }
+      {
+        const iter = map.iteratorFromIndex(-COUNT);
+        assert.strictEqual(decoder.decode(iter.next()!.readKeyValuePair().keyCursor.readBytes(MAX_READ_BYTES)), 'k0000');
+      }
+      // out of range past either end yields nothing
+      {
+        assert.ok(!map.iteratorFromIndex(COUNT).hasNext());
+        assert.ok(!map.iteratorFromIndex(-COUNT - 1).hasNext());
+      }
 
       // remove the even keys, then re-verify order, count, and presence
       {
@@ -1504,5 +1519,99 @@ function testSortedMap(core: Core, hasher: Hasher): void {
     const map1 = new ReadSortedMap(m1.getCursor('map')!);
     assert.strictEqual(map1.count(), COUNT / 2);
     assert.strictEqual(map1.getCursor('k0001')!.readUint(), 7);
+  }
+}
+
+describe('Iterator From Index', () => {
+  test('in-memory storage', () => {
+    const core = new CoreMemory();
+    testIteratorFrom(core, new Hasher('SHA-1'));
+  });
+
+  test('file storage', () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-'));
+    try {
+      using core = new CoreFile(join(tmpDir, 'test.db'));
+      testIteratorFrom(core, new Hasher('SHA-1'));
+    } finally {
+      rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  test('buffered file storage', () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-'));
+    try {
+      using core = new CoreBufferedFile(join(tmpDir, 'test.db'));
+      testIteratorFrom(core, new Hasher('SHA-1'));
+    } finally {
+      rmSync(tmpDir, { recursive: true });
+    }
+  });
+});
+
+function testIteratorFrom(core: Core, hasher: Hasher): void {
+  core.setLength(0);
+  const db = new Database(core, hasher);
+
+  // enough items to force several tiers in both the array-list radix trie
+  // (16^2 = 256 > 200) and the linked-array-list b-tree
+  const COUNT = 200;
+
+  const history = new WriteArrayList(db.rootCursor());
+  history.appendContext(history.getSlot(-1), (cursor) => {
+    const moment = new WriteHashMap(cursor);
+    const list = new WriteArrayList(moment.putCursor('list'));
+    for (let i = 0; i < COUNT; i++) list.append(new Uint(i));
+    const linked = new WriteLinkedArrayList(moment.putCursor('linked'));
+    for (let i = 0; i < COUNT; i++) linked.append(new Uint(i));
+  });
+
+  const moment = new ReadHashMap(history.getCursor(-1)!);
+  const list = new ReadArrayList(moment.getCursor('list')!);
+  const linked = new ReadLinkedArrayList(moment.getCursor('linked')!);
+
+  // iteratorFrom(k) yields exactly k, k+1, .., COUNT-1 in order, for both types.
+  // negative indexes count from the end: -1 starts at the last element, -COUNT
+  // at the first.
+  const starts = [0, 1, 15, 16, 17, 100, COUNT - 2, COUNT - 1, -1, -2, -16, -100, -COUNT];
+  for (const start of starts) {
+    const resolved = start < 0 ? COUNT + start : start;
+    {
+      const iter = list.iteratorFrom(start);
+      let expected = resolved;
+      let c;
+      while ((c = iter.next()) !== null) {
+        assert.strictEqual(c.readUint(), expected);
+        expected += 1;
+      }
+      assert.strictEqual(expected, COUNT);
+    }
+    {
+      const iter = linked.iteratorFrom(start);
+      let expected = resolved;
+      let c;
+      while ((c = iter.next()) !== null) {
+        assert.strictEqual(c.readUint(), expected);
+        expected += 1;
+      }
+      assert.strictEqual(expected, COUNT);
+    }
+  }
+
+  // iteratorFrom(0) matches a plain iterator()
+  {
+    const a = list.iterator();
+    const b = list.iteratorFrom(0);
+    let ca;
+    while ((ca = a.next()) !== null) {
+      assert.strictEqual(b.next()!.readUint(), ca.readUint());
+    }
+    assert.ok(!b.hasNext());
+  }
+
+  // a start out of range (past the end, or more negative than -COUNT) yields nothing
+  for (const start of [COUNT, COUNT + 1, COUNT + 1000, -COUNT - 1, -COUNT - 1000]) {
+    assert.ok(!list.iteratorFrom(start).hasNext());
+    assert.ok(!linked.iteratorFrom(start).hasNext());
   }
 }
