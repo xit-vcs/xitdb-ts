@@ -32,6 +32,7 @@ import {
   SlotPointer,
   ReadCursor,
   WriteCursor,
+  WriteCursorIterator,
   SortedMapGet,
   SortedMapGetIndex,
   SortedMapGetKey,
@@ -1564,6 +1565,21 @@ function testIteratorFrom(core: Core, hasher: Hasher): void {
     for (let i = 0; i < COUNT; i++) list.append(new Uint(i));
     const linked = new WriteLinkedArrayList(moment.putCursor('linked'));
     for (let i = 0; i < COUNT; i++) linked.append(new Uint(i));
+
+    // the write-side structs expose iteratorFrom too, yielding write cursors
+    const checkWrite = (it: WriteCursorIterator, wantFirst: number, wantN: number): void => {
+      let first = -1;
+      let n = 0;
+      while (it.hasNext()) {
+        const c = it.next()!;
+        if (first < 0) first = c.readUint();
+        n++;
+      }
+      assert.strictEqual(first, wantFirst);
+      assert.strictEqual(n, wantN);
+    };
+    checkWrite(list.iteratorFrom(COUNT - 3), COUNT - 3, 3);
+    checkWrite(linked.iteratorFrom(-2), COUNT - 2, 2);
   });
 
   const moment = new ReadHashMap(history.getCursor(-1)!);

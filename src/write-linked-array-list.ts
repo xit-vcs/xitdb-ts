@@ -23,6 +23,10 @@ export class WriteLinkedArrayList extends ReadLinkedArrayList {
     return (this.cursor as WriteCursor).iterator();
   }
 
+  override iteratorFrom(index: number): WriteCursorIterator {
+    return WriteCursorIterator.from(super.iteratorFrom(index));
+  }
+
   override *[Symbol.iterator](): Iterator<WriteCursor> {
     yield* this.cursor as WriteCursor;
   }

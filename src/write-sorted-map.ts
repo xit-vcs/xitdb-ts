@@ -21,6 +21,14 @@ export class WriteSortedMap extends ReadSortedMap {
     return (this.cursor as WriteCursor).iterator();
   }
 
+  override iteratorFrom(key: string | Bytes | Uint8Array): WriteCursorIterator {
+    return WriteCursorIterator.from(super.iteratorFrom(key));
+  }
+
+  override iteratorFromIndex(startIndex: number): WriteCursorIterator {
+    return WriteCursorIterator.from(super.iteratorFromIndex(startIndex));
+  }
+
   override *[Symbol.iterator](): Iterator<WriteCursor> {
     yield* this.cursor as WriteCursor;
   }

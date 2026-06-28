@@ -156,6 +156,16 @@ export class WriteCursorIterator extends CursorIterator {
     super(cursor);
   }
 
+  // wrap an already-seeked read iterator so it yields write cursors. backs the
+  // write-side iteratorFrom/iteratorFromIndex methods.
+  static from(inner: CursorIterator): WriteCursorIterator {
+    const it = new WriteCursorIterator(inner.cursor as WriteCursor);
+    it.size = inner.size;
+    it.index = inner.index;
+    it.stack = inner.stack;
+    return it;
+  }
+
   override next(): WriteCursor | null {
     const readCursor = super.next();
     if (readCursor !== null) {

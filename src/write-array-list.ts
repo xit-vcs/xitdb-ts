@@ -21,6 +21,10 @@ export class WriteArrayList extends ReadArrayList {
     return (this.cursor as WriteCursor).iterator();
   }
 
+  override iteratorFrom(index: number): WriteCursorIterator {
+    return WriteCursorIterator.from(super.iteratorFrom(index));
+  }
+
   override *[Symbol.iterator](): Iterator<WriteCursor> {
     yield* this.cursor as WriteCursor;
   }

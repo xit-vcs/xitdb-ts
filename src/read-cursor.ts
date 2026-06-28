@@ -379,7 +379,7 @@ export class CursorIterator {
   cursor: ReadCursor;
   size: number = 0;
   index: number = 0;
-  private stack: IteratorLevel[] = [];
+  stack: IteratorLevel[] = [];
   private nextCursorMaybe: ReadCursor | null = null;
 
   constructor(cursor: ReadCursor) {
