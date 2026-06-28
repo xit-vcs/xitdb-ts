@@ -47,16 +47,6 @@ import { mkdtempSync, rmSync } from 'fs';
 
 const MAX_READ_BYTES = 1024;
 
-// build a SortedMap key that sorts by creation time. the big-endian
-// timestamp makes byte order match chronological order; the post id is
-// appended so two posts with the same timestamp still get distinct keys.
-function orderKey(timestamp: number, postId: Uint8Array): Uint8Array {
-  const key = new Uint8Array(8 + postId.length);
-  new DataView(key.buffer).setBigUint64(0, BigInt(timestamp), false); // false = big-endian
-  key.set(postId, 8);
-  return key;
-}
-
 describe('High Level API', () => {
   test('in-memory storage', () => {
     const core = new CoreMemory();
@@ -847,82 +837,101 @@ function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null): 
   {
     const history = new WriteArrayList(db.rootCursor());
 
-    interface Post {
+    interface User {
       id: string;
-      title: string;
-      createdTs: number;
+      username: string;
+      name: string;
     }
 
-    // post ids are fixed-length so the timestamp tie-breaker stays aligned
-    const newPosts: Post[] = [
-      { id: 'post000000000001', title: 'Hello, world', createdTs: 1_700_000_000 },
-      { id: 'post000000000002', title: 'Second post', createdTs: 1_700_000_500 },
-      { id: 'post000000000003', title: 'Third post', createdTs: 1_700_001_000 },
+    // inserted in arbitrary order; the index sorts them alphabetically
+    const newUsers: User[] = [
+      { id: 'user000000000001', username: 'dave', name: 'Dave Smith' },
+      { id: 'user000000000002', username: 'alice', name: 'Alice Jones' },
+      { id: 'user000000000003', username: 'carol', name: 'Carol White' },
+      { id: 'user000000000004', username: 'dan', name: 'Dan Brown' },
+      { id: 'user000000000005', username: 'bob', name: 'Bob Lee' },
+      { id: 'user000000000006', username: 'eve', name: 'Eve Adams' },
     ];
 
-    const encoder = new TextEncoder();
     const decoder = new TextDecoder();
 
     history.appendContext(history.getSlot(-1), (cursor) => {
       const moment = new WriteHashMap(cursor);
 
-      // the primary store: a HashMap from post id to the post's fields
-      const idToPostCursor = moment.putCursor('id->post');
-      const idToPost = new WriteHashMap(idToPostCursor);
+      // the primary store: a HashMap from user id to the user's fields
+      const idToUserCursor = moment.putCursor('id->user');
+      const idToUser = new WriteHashMap(idToUserCursor);
 
-      // the secondary index: a SortedMap ordered by creation time
-      const createdTsToPostIdCursor = moment.putCursor('created-ts->post-id');
-      const createdTsToPostId = new WriteSortedMap(createdTsToPostIdCursor);
+      // the secondary index: a SortedMap ordered alphabetically by username
+      const usernameToIdCursor = moment.putCursor('username->id');
+      const usernameToId = new WriteSortedMap(usernameToIdCursor);
 
-      for (const post of newPosts) {
-        const postCursor = idToPost.putCursor(post.id);
-        const postMap = new WriteHashMap(postCursor);
-        postMap.put('title', new Bytes(post.title));
-        postMap.put('created-ts', new Uint(post.createdTs));
+      for (const user of newUsers) {
+        const userCursor = idToUser.putCursor(user.id);
+        const userMap = new WriteHashMap(userCursor);
+        userMap.put('username', new Bytes(user.username));
+        userMap.put('name', new Bytes(user.name));
 
-        const orderKeyBytes = orderKey(post.createdTs, encoder.encode(post.id));
-        createdTsToPostId.put(orderKeyBytes, new Bytes(post.id));
+        // the key is the username (the sort key); the value is the id
+        usernameToId.put(user.username, new Bytes(user.id));
       }
     });
 
     const momentCursor = history.getCursor(-1);
     const moment = new ReadHashMap(momentCursor!);
 
-    const idToPostCursor = moment.getCursor('id->post');
-    const idToPost = new ReadHashMap(idToPostCursor!);
+    const idToUserCursor = moment.getCursor('id->user');
+    const idToUser = new ReadHashMap(idToUserCursor!);
 
-    const createdTsToPostIdCursor = moment.getCursor('created-ts->post-id');
-    const createdTsToPostId = new ReadSortedMap(createdTsToPostIdCursor!);
+    const usernameToIdCursor = moment.getCursor('username->id');
+    const usernameToId = new ReadSortedMap(usernameToIdCursor!);
 
-    assert.strictEqual(createdTsToPostId.count(), newPosts.length);
+    assert.strictEqual(usernameToId.count(), newUsers.length);
 
-    // page through the index two at a time, oldest first, and check we get
-    // every post back in creation order
+    // page through the index two at a time and check we get every user back
+    // in alphabetical order by username (not the order they were inserted)
     const pageSize = 2;
-    const expectedTitles = ['Hello, world', 'Second post', 'Third post'];
+    const expectedNames = ['Alice Jones', 'Bob Lee', 'Carol White', 'Dan Brown', 'Dave Smith', 'Eve Adams'];
 
-    const count = createdTsToPostId.count();
+    const count = usernameToId.count();
     let seen = 0;
     for (let after = 0; after < count; after += pageSize) {
       const end = Math.min(after + pageSize, count);
-      const iter = createdTsToPostId.iteratorFromIndex(after);
+      const iter = usernameToId.iteratorFromIndex(after);
       for (let i = after; i < end && iter.hasNext(); i++) {
         const idCursor = iter.next()!;
         const idKv = idCursor.readKeyValuePair();
 
-        // the index entry's value is the post id; use it to read the
-        // full post out of the primary map
-        const postId = decoder.decode(idKv.valueCursor.readBytes(MAX_READ_BYTES));
+        // the index entry's value is the user id; use it to read the
+        // full user out of the primary map
+        const userId = decoder.decode(idKv.valueCursor.readBytes(MAX_READ_BYTES));
 
-        const postCursor = idToPost.getCursor(postId);
-        const postMap = new ReadHashMap(postCursor!);
-        const titleCursor = postMap.getCursor('title');
-        const title = decoder.decode(titleCursor!.readBytes(MAX_READ_BYTES));
-        assert.strictEqual(title, expectedTitles[seen]);
+        const userCursor = idToUser.getCursor(userId);
+        const userMap = new ReadHashMap(userCursor!);
+        const nameCursor = userMap.getCursor('name');
+        const name = decoder.decode(nameCursor!.readBytes(MAX_READ_BYTES));
+        assert.strictEqual(name, expectedNames[seen]);
         seen += 1;
       }
     }
-    assert.strictEqual(seen, newPosts.length);
+    assert.strictEqual(seen, newUsers.length);
+
+    // autocomplete: seek straight to the first username >= "da", then walk
+    // forward only while the prefix matches. this lower-bound seek by key is
+    // the thing an ArrayList can't do.
+    const prefix = 'da';
+    const expectedMatches = ['dan', 'dave'];
+    let matches = 0;
+    const acIter = usernameToId.iteratorFrom(prefix);
+    while (acIter.hasNext()) {
+      const idCursor = acIter.next()!;
+      const idKv = idCursor.readKeyValuePair();
+      const username = decoder.decode(idKv.keyCursor.readBytes(MAX_READ_BYTES));
+      if (!username.startsWith(prefix)) break;
+      assert.strictEqual(username, expectedMatches[matches]);
+      matches += 1;
+    }
+    assert.strictEqual(matches, expectedMatches.length);
   }
 }
 
