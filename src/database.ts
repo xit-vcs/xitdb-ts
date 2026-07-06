@@ -1545,7 +1545,10 @@ export class Database {
     const hasher = new Hasher(this.hasher.algorithm, this.header.hashId);
     const target = new Database(targetCore, hasher);
 
-    if (this.header.tag === Tag.NONE) return target;
+    if (this.header.tag === Tag.NONE) {
+      targetCore.sync();
+      return target;
+    }
     if (this.header.tag !== Tag.ARRAY_LIST) throw new UnexpectedTagException();
 
     // read source's top-level ArrayListHeader
@@ -1555,7 +1558,10 @@ export class Database {
     sourceReader.readFully(headerBytes);
     const sourceHeader = ArrayListHeader.fromBytes(headerBytes);
 
-    if (sourceHeader.size === 0) return target;
+    if (sourceHeader.size === 0) {
+      targetCore.sync();
+      return target;
+    }
 
     // read the last moment's slot
     const lastKey = sourceHeader.size - 1;
@@ -1590,6 +1596,10 @@ export class Database {
     targetCore.seek(Header.LENGTH + ArrayListHeader.LENGTH);
     targetWriter.writeLong(fileSize);
     targetCore.flush();
+
+    // fsync so the compacted database is durable, since callers
+    // typically rename it over an existing database file
+    targetCore.sync();
 
     return target;
   }
