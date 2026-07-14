@@ -557,7 +557,12 @@ export class ArrayListAppend implements PathPartBase {
 
     const writer = db.core.writer();
     if (isTopLevel) {
-      db.core.flush();
+      // flush and fsync before updating the header, because updating the
+      // header is what completes the transaction. without the fsync, the OS
+      // could persist the header before the data it points to, so a crash
+      // could commit a moment whose data never reached disk. writePath does
+      // a second sync afterwards to make the header itself durable.
+      db.core.sync();
       const fileSize = db.core.length();
       const header = new TopLevelArrayListHeader(fileSize, appendResult.header);
       db.core.seek(nextArrayListStart);
@@ -596,6 +601,12 @@ export class ArrayListSlice implements PathPartBase {
 
     const sliceHeader = db.readArrayListSlice(origHeader, this.size);
     const finalSlotPtr = db.readSlotPointer(writeMode, path, pathI + 1, slotPtr);
+
+    // if top level, updating the header below commits the transaction,
+    // so make everything written so far durable first
+    if (isTopLevel) {
+      db.core.sync();
+    }
 
     const writer = db.core.writer();
     db.core.seek(nextArrayListStart);
