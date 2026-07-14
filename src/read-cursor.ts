@@ -399,9 +399,15 @@ export class CursorIterator {
   // iterating in key order from there. negative indexes count from the end.
   static initSortedFromIndex(cursor: ReadCursor, startIndex: number): CursorIterator {
     const it = new CursorIterator(cursor);
-    // an unwritten map is NONE (like iterator()): yield nothing
-    if (cursor.slotPtr.slot.tag === Tag.NONE) {
-      return it;
+    switch (cursor.slotPtr.slot.tag) {
+      // an unwritten map is NONE (like iterator()): yield nothing
+      case Tag.NONE:
+        return it;
+      case Tag.SORTED_MAP:
+      case Tag.SORTED_SET:
+        break;
+      default:
+        throw new UnexpectedTagException();
     }
     const total = cursor.count();
     const idx = CursorIterator.resolveStartIndex(startIndex, total);
@@ -420,8 +426,13 @@ export class CursorIterator {
   // unwritten list) yields nothing.
   static initArrayListFromIndex(cursor: ReadCursor, startIndex: number): CursorIterator {
     const it = new CursorIterator(cursor);
-    if (cursor.slotPtr.slot.tag !== Tag.ARRAY_LIST) {
-      return it;
+    switch (cursor.slotPtr.slot.tag) {
+      case Tag.NONE:
+        return it;
+      case Tag.ARRAY_LIST:
+        break;
+      default:
+        throw new UnexpectedTagException();
     }
     cursor.db.core.seek(Number(cursor.slotPtr.slot.value));
     const reader = cursor.db.core.reader();
@@ -444,8 +455,13 @@ export class CursorIterator {
   // count-augmented b-tree straight to that index. negatives count from the end.
   static initLinkedArrayListFromIndex(cursor: ReadCursor, startIndex: number): CursorIterator {
     const it = new CursorIterator(cursor);
-    if (cursor.slotPtr.slot.tag !== Tag.LINKED_ARRAY_LIST) {
-      return it;
+    switch (cursor.slotPtr.slot.tag) {
+      case Tag.NONE:
+        return it;
+      case Tag.LINKED_ARRAY_LIST:
+        break;
+      default:
+        throw new UnexpectedTagException();
     }
     cursor.db.core.seek(Number(cursor.slotPtr.slot.value));
     const reader = cursor.db.core.reader();
@@ -465,8 +481,14 @@ export class CursorIterator {
   // start a sorted-map iterator at the first entry with key >= startKey
   static initSortedFromKey(cursor: ReadCursor, startKey: Uint8Array): CursorIterator {
     const it = new CursorIterator(cursor);
-    if (cursor.slotPtr.slot.tag === Tag.NONE) {
-      return it;
+    switch (cursor.slotPtr.slot.tag) {
+      case Tag.NONE:
+        return it;
+      case Tag.SORTED_MAP:
+      case Tag.SORTED_SET:
+        break;
+      default:
+        throw new UnexpectedTagException();
     }
     const total = cursor.count();
     const rootPtr = CursorIterator.sortedRootPtr(cursor);

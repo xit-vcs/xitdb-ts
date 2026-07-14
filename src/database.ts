@@ -422,6 +422,8 @@ export class ArrayListInit implements PathPartBase {
         db.core.seek(0);
         db.header = db.header.withTag(Tag.ARRAY_LIST);
         writer.write(db.header.toBytes());
+      } else if (db.header.tag !== Tag.ARRAY_LIST) {
+        throw new UnexpectedTagException();
       }
 
       const nextSlotPtr = slotPtr.withSlot(slotPtr.slot.withTag(Tag.ARRAY_LIST));
@@ -969,6 +971,21 @@ export class HashMapInit implements PathPartBase {
         db.core.seek(0);
         db.header = db.header.withTag(tag);
         writer.write(db.header.toBytes());
+      } else {
+        // map and set variants are interchangeable, but counted-ness must
+        // match since counted layouts have an 8-byte count prefix
+        switch (db.header.tag) {
+          case Tag.HASH_MAP:
+          case Tag.HASH_SET:
+            if (this.counted) throw new UnexpectedTagException();
+            break;
+          case Tag.COUNTED_HASH_MAP:
+          case Tag.COUNTED_HASH_SET:
+            if (!this.counted) throw new UnexpectedTagException();
+            break;
+          default:
+            throw new UnexpectedTagException();
+        }
       }
 
       const nextSlotPtr = slotPtr.withSlot(slotPtr.slot.withTag(tag));
