@@ -3015,6 +3015,13 @@ export class Database {
 
 // compaction helpers
 
+function reserveBlock(targetCore: Core, size: number): number {
+  const offset = targetCore.length();
+  targetCore.seek(offset);
+  targetCore.writer().write(new Uint8Array(size));
+  return offset;
+}
+
 function remapSlot(
   sourceCore: Core,
   targetCore: Core,
@@ -3032,29 +3039,25 @@ function remapSlot(
     case Tag.BYTES: {
       const mapped = offsetMap.get(Number(slot.value));
       if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
-      const newOffset = remapBytes(sourceCore, targetCore, slot);
-      offsetMap.set(Number(slot.value), newOffset);
+      const newOffset = remapBytes(sourceCore, targetCore, offsetMap, slot);
       return new Slot(newOffset, slot.tag, slot.full);
     }
     case Tag.INDEX: {
       const mapped = offsetMap.get(Number(slot.value));
       if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
       const newOffset = remapIndex(sourceCore, targetCore, hashSize, offsetMap, slot);
-      offsetMap.set(Number(slot.value), newOffset);
       return new Slot(newOffset, slot.tag, slot.full);
     }
     case Tag.ARRAY_LIST: {
       const mapped = offsetMap.get(Number(slot.value));
       if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
       const newOffset = remapArrayList(sourceCore, targetCore, hashSize, offsetMap, slot);
-      offsetMap.set(Number(slot.value), newOffset);
       return new Slot(newOffset, slot.tag, slot.full);
     }
     case Tag.LINKED_ARRAY_LIST: {
       const mapped = offsetMap.get(Number(slot.value));
       if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
       const newOffset = remapBTree(sourceCore, targetCore, hashSize, offsetMap, slot);
-      offsetMap.set(Number(slot.value), newOffset);
       return new Slot(newOffset, slot.tag, slot.full);
     }
     case Tag.HASH_MAP:
@@ -3062,7 +3065,6 @@ function remapSlot(
       const mapped = offsetMap.get(Number(slot.value));
       if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
       const newOffset = remapHashMapOrSet(sourceCore, targetCore, hashSize, offsetMap, slot, false);
-      offsetMap.set(Number(slot.value), newOffset);
       return new Slot(newOffset, slot.tag, slot.full);
     }
     case Tag.COUNTED_HASH_MAP:
@@ -3070,14 +3072,12 @@ function remapSlot(
       const mapped = offsetMap.get(Number(slot.value));
       if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
       const newOffset = remapHashMapOrSet(sourceCore, targetCore, hashSize, offsetMap, slot, true);
-      offsetMap.set(Number(slot.value), newOffset);
       return new Slot(newOffset, slot.tag, slot.full);
     }
     case Tag.KV_PAIR: {
       const mapped = offsetMap.get(Number(slot.value));
       if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
       const newOffset = remapKvPair(sourceCore, targetCore, hashSize, offsetMap, slot);
-      offsetMap.set(Number(slot.value), newOffset);
       return new Slot(newOffset, slot.tag, slot.full);
     }
     case Tag.SORTED_MAP:
@@ -3085,7 +3085,6 @@ function remapSlot(
       const mapped = offsetMap.get(Number(slot.value));
       if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
       const newOffset = remapSortedMap(sourceCore, targetCore, hashSize, offsetMap, slot);
-      offsetMap.set(Number(slot.value), newOffset);
       return new Slot(newOffset, slot.tag, slot.full);
     }
     default:
@@ -3093,7 +3092,12 @@ function remapSlot(
   }
 }
 
-function remapBytes(sourceCore: Core, targetCore: Core, slot: Slot): number {
+function remapBytes(
+  sourceCore: Core,
+  targetCore: Core,
+  offsetMap: Map<number, number>,
+  slot: Slot
+): number {
   sourceCore.seek(Number(slot.value));
   const sourceReader = sourceCore.reader();
   const length = sourceReader.readLong();
@@ -3117,6 +3121,7 @@ function remapBytes(sourceCore: Core, targetCore: Core, slot: Slot): number {
     remaining -= chunk;
   }
 
+  offsetMap.set(Number(slot.value), newOffset);
   return newOffset;
 }
 
@@ -3133,6 +3138,9 @@ function remapIndex(
   const blockBytes = new Uint8Array(INDEX_BLOCK_SIZE);
   sourceReader.readFully(blockBytes);
 
+  const newOffset = reserveBlock(targetCore, INDEX_BLOCK_SIZE);
+  offsetMap.set(Number(slot.value), newOffset);
+
   // remap each slot
   const remappedSlots: Slot[] = [];
   for (let i = 0; i < SLOT_COUNT; i++) {
@@ -3142,7 +3150,6 @@ function remapIndex(
   }
 
   // write remapped block to target
-  const newOffset = targetCore.length();
   targetCore.seek(newOffset);
   const targetWriter = targetCore.writer();
   for (const s of remappedSlots) {
@@ -3166,12 +3173,14 @@ function remapArrayList(
   sourceReader.readFully(headerBytes);
   const header = ArrayListHeader.fromBytes(headerBytes);
 
+  const newOffset = reserveBlock(targetCore, ArrayListHeader.LENGTH);
+  offsetMap.set(Number(slot.value), newOffset);
+
   // remap root index block pointer via remapSlot as an .index slot
   const indexSlot = new Slot(header.ptr, Tag.INDEX);
   const remappedIndex = remapSlot(sourceCore, targetCore, hashSize, offsetMap, indexSlot);
 
   // write new ArrayListHeader with remapped ptr
-  const newOffset = targetCore.length();
   targetCore.seek(newOffset);
   const targetWriter = targetCore.writer();
   targetWriter.write(new ArrayListHeader(Number(remappedIndex.value), header.size).toBytes());
@@ -3192,9 +3201,11 @@ function remapBTree(
   sourceReader.readFully(headerBytes);
   const header = BTreeHeader.fromBytes(headerBytes);
 
+  const newOffset = reserveBlock(targetCore, BTreeHeader.LENGTH);
+  offsetMap.set(Number(slot.value), newOffset);
+
   const remappedRoot = remapBTreeNode(sourceCore, targetCore, hashSize, offsetMap, header.rootPtr);
 
-  const newOffset = targetCore.length();
   targetCore.seek(newOffset);
   const targetWriter = targetCore.writer();
   targetWriter.write(new BTreeHeader(remappedRoot, header.size).toBytes());
@@ -3221,11 +3232,15 @@ function remapBTreeNode(
   if (kindInt > BTreeNodeKind.BRANCH) throw new InvalidBTreeNodeKindException();
   const kind = kindInt as BTreeNodeKind;
   const num = nodeHeader[1];
+  if (num > BTREE_SLOT_COUNT) throw new InvalidBTreeNodeException();
 
   switch (kind) {
     case BTreeNodeKind.LEAF: {
       const body = new Uint8Array(Slot.LENGTH * BTREE_SLOT_COUNT);
       sourceReader.readFully(body);
+
+      const newOffset = reserveBlock(targetCore, BTREE_LEAF_BLOCK_SIZE);
+      offsetMap.set(nodeOffset, newOffset);
 
       const slots: Slot[] = [];
       for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
@@ -3233,19 +3248,20 @@ function remapBTreeNode(
         slots.push(remapSlot(sourceCore, targetCore, hashSize, offsetMap, valueSlot));
       }
 
-      const newOffset = targetCore.length();
       targetCore.seek(newOffset);
       const targetWriter = targetCore.writer();
       targetWriter.write(new Uint8Array([kindInt, num]));
       for (const s of slots) targetWriter.write(s.toBytes());
 
-      offsetMap.set(nodeOffset, newOffset);
       return newOffset;
     }
     case BTreeNodeKind.BRANCH: {
       const body = new Uint8Array((Slot.LENGTH + 8) * BTREE_SLOT_COUNT);
       sourceReader.readFully(body);
       const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
+
+      const newOffset = reserveBlock(targetCore, BTREE_BRANCH_BLOCK_SIZE);
+      offsetMap.set(nodeOffset, newOffset);
 
       const children: Slot[] = [];
       for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
@@ -3263,14 +3279,12 @@ function remapBTreeNode(
         counts.push(Number(view.getBigInt64(countsOffset + i * 8, false)));
       }
 
-      const newOffset = targetCore.length();
       targetCore.seek(newOffset);
       const targetWriter = targetCore.writer();
       targetWriter.write(new Uint8Array([kindInt, num]));
       for (const s of children) targetWriter.write(s.toBytes());
       for (const c of counts) targetWriter.writeLong(c);
 
-      offsetMap.set(nodeOffset, newOffset);
       return newOffset;
     }
   }
@@ -3290,9 +3304,11 @@ function remapSortedMap(
   sourceReader.readFully(headerBytes);
   const header = BTreeHeader.fromBytes(headerBytes);
 
+  const newOffset = reserveBlock(targetCore, BTreeHeader.LENGTH);
+  offsetMap.set(Number(slot.value), newOffset);
+
   const remappedRoot = remapSortedMapNode(sourceCore, targetCore, hashSize, offsetMap, header.rootPtr);
 
-  const newOffset = targetCore.length();
   targetCore.seek(newOffset);
   const targetWriter = targetCore.writer();
   targetWriter.write(new BTreeHeader(remappedRoot, header.size).toBytes());
@@ -3318,11 +3334,15 @@ function remapSortedMapNode(
   if (kindInt > BTreeNodeKind.BRANCH) throw new InvalidBTreeNodeKindException();
   const kind = kindInt as BTreeNodeKind;
   const num = nodeHeader[1];
+  if (num > BTREE_SLOT_COUNT) throw new InvalidBTreeNodeException();
 
   switch (kind) {
     case BTreeNodeKind.LEAF: {
       const body = new Uint8Array(Slot.LENGTH * BTREE_SLOT_COUNT);
       sourceReader.readFully(body);
+
+      const newOffset = reserveBlock(targetCore, SORTED_LEAF_BLOCK_SIZE);
+      offsetMap.set(nodeOffset, newOffset);
 
       const entries: Slot[] = [];
       for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
@@ -3330,19 +3350,20 @@ function remapSortedMapNode(
         entries.push(remapSlot(sourceCore, targetCore, hashSize, offsetMap, entry));
       }
 
-      const newOffset = targetCore.length();
       targetCore.seek(newOffset);
       const targetWriter = targetCore.writer();
       targetWriter.write(new Uint8Array([kindInt, num]));
       for (const s of entries) targetWriter.write(s.toBytes());
 
-      offsetMap.set(nodeOffset, newOffset);
       return newOffset;
     }
     case BTreeNodeKind.BRANCH: {
       const body = new Uint8Array((Slot.LENGTH * 2 + 8) * BTREE_SLOT_COUNT);
       sourceReader.readFully(body);
       const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
+
+      const newOffset = reserveBlock(targetCore, SORTED_BRANCH_BLOCK_SIZE);
+      offsetMap.set(nodeOffset, newOffset);
 
       const children: Slot[] = [];
       for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
@@ -3366,7 +3387,6 @@ function remapSortedMapNode(
         counts.push(Number(view.getBigInt64(countsOffset + i * 8, false)));
       }
 
-      const newOffset = targetCore.length();
       targetCore.seek(newOffset);
       const targetWriter = targetCore.writer();
       targetWriter.write(new Uint8Array([kindInt, num]));
@@ -3374,7 +3394,6 @@ function remapSortedMapNode(
       for (const s of separators) targetWriter.write(s.toBytes());
       for (const c of counts) targetWriter.writeLong(c);
 
-      offsetMap.set(nodeOffset, newOffset);
       return newOffset;
     }
   }
@@ -3401,6 +3420,9 @@ function remapHashMapOrSet(
   const blockBytes = new Uint8Array(INDEX_BLOCK_SIZE);
   sourceReader.readFully(blockBytes);
 
+  const newOffset = reserveBlock(targetCore, INDEX_BLOCK_SIZE + (counted ? 8 : 0));
+  offsetMap.set(Number(slot.value), newOffset);
+
   // remap each child slot in the block
   const remappedSlots: Slot[] = [];
   for (let i = 0; i < SLOT_COUNT; i++) {
@@ -3410,7 +3432,6 @@ function remapHashMapOrSet(
   }
 
   // write [optional count][remapped block] contiguously to target
-  const newOffset = targetCore.length();
   targetCore.seek(newOffset);
   const targetWriter = targetCore.writer();
   if (counted) {
@@ -3437,12 +3458,14 @@ function remapKvPair(
   sourceReader.readFully(kvPairBytes);
   const kvPair = KeyValuePair.fromBytes(kvPairBytes, hashSize);
 
+  const newOffset = reserveBlock(targetCore, KeyValuePair.length(hashSize));
+  offsetMap.set(Number(slot.value), newOffset);
+
   // remap key_slot and value_slot
   const remappedKey = remapSlot(sourceCore, targetCore, hashSize, offsetMap, kvPair.keySlot);
   const remappedValue = remapSlot(sourceCore, targetCore, hashSize, offsetMap, kvPair.valueSlot);
 
   // write remapped KV pair (hash stays unchanged)
-  const newOffset = targetCore.length();
   targetCore.seek(newOffset);
   const targetWriter = targetCore.writer();
   targetWriter.write(new KeyValuePair(remappedValue, remappedKey, kvPair.hash).toBytes());

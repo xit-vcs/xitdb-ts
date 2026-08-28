@@ -1089,6 +1089,18 @@ function testCompaction(
       history.appendContext(history.getSlot(-1), (cursor) => {
         const moment = new WriteHashMap(cursor);
         moment.put('key1', new Bytes('final_value'));
+
+        // cycles must survive compaction rather than causing the
+        // remapper to recurse indefinitely.
+        moment.put('self', moment.slot());
+
+        const cyclicList = new WriteArrayList(moment.putCursor('cyclic-list'));
+        cyclicList.append(cyclicList.slot());
+
+        const mapA = new WriteHashMap(moment.putCursor('map-a'));
+        const mapB = new WriteHashMap(moment.putCursor('map-b'));
+        mapA.put('map-b', mapB.slot());
+        mapB.put('map-a', mapA.slot());
       });
     }
 
@@ -1109,6 +1121,21 @@ function testCompaction(
     // verify all data from latest moment is correct
     const momentCursor = history.getCursor(0);
     const moment = new ReadHashMap(momentCursor!);
+
+    // self-references and mutual references point back to the same compacted
+    // objects rather than duplicate objects or dangling source offsets.
+    const selfCursor = moment.getCursor('self');
+    assert.ok(selfCursor!.slot().equals(momentCursor!.slot()));
+
+    const cyclicListCursor = moment.getCursor('cyclic-list');
+    const cyclicList = new ReadArrayList(cyclicListCursor!);
+    assert.ok(cyclicList.getSlot(0)!.equals(cyclicListCursor!.slot()));
+
+    const mapACursor = moment.getCursor('map-a');
+    const mapA = new ReadHashMap(mapACursor!);
+    const mapBCursor = mapA.getCursor('map-b');
+    const mapB = new ReadHashMap(mapBCursor!);
+    assert.ok(mapB.getSlot('map-a')!.equals(mapACursor!.slot()));
 
     // key1 should have the final value
     assert.strictEqual(decoder.decode((moment.getCursor('key1'))!.readBytes(MAX_READ_BYTES)), 'final_value');
