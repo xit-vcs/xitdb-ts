@@ -5,6 +5,7 @@ import { Slot } from './slot.js';
 import { SlotPointer } from './slot-pointer.js';
 import {
   InvalidDatabaseException,
+  TruncatedDatabaseException,
   InvalidVersionException,
   InvalidHashSizeException,
   KeyNotFoundException,
@@ -151,6 +152,14 @@ export class TopLevelArrayListHeader {
     arr.set(this.parent.toBytes(), 0);
     view.setBigInt64(ArrayListHeader.LENGTH, BigInt(this.fileSize), false);
     return arr;
+  }
+
+  static fromBytes(bytes: Uint8Array): TopLevelArrayListHeader {
+    const parent = ArrayListHeader.fromBytes(bytes.subarray(0, ArrayListHeader.LENGTH));
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const fileSize = Number(view.getBigInt64(ArrayListHeader.LENGTH, false));
+    checkLong(fileSize);
+    return new TopLevelArrayListHeader(fileSize, parent);
   }
 }
 
@@ -1635,23 +1644,30 @@ export class Database {
   truncate(): void {
     if (this.header.tag !== Tag.ARRAY_LIST) return;
 
-    const rootCursor = this.rootCursor();
-    const listSize = rootCursor.count();
-
-    if (listSize === 0) return;
-
-    this.core.seek(Header.LENGTH + ArrayListHeader.LENGTH);
+    this.core.seek(Header.LENGTH);
     const reader = this.core.reader();
-    const headerFileSize = reader.readLong();
+    const headerBytes = new Uint8Array(TopLevelArrayListHeader.LENGTH);
+    reader.readFully(headerBytes);
+    const header = TopLevelArrayListHeader.fromBytes(headerBytes);
 
-    if (headerFileSize === 0) return;
+    const minimumSize = Header.LENGTH + TopLevelArrayListHeader.LENGTH + INDEX_BLOCK_SIZE;
+    let committedSize: number;
+    if (header.fileSize === 0) {
+      if (header.parent.size !== 0) throw new InvalidDatabaseException();
+      committedSize = minimumSize;
+    } else {
+      committedSize = header.fileSize;
+    }
+
+    if (committedSize < minimumSize) throw new InvalidDatabaseException();
 
     const fileSize = this.core.length();
 
-    if (fileSize === headerFileSize) return;
+    if (fileSize < committedSize) throw new TruncatedDatabaseException();
+    if (fileSize === committedSize) return;
 
     try {
-      this.core.setLength(headerFileSize);
+      this.core.setLength(committedSize);
     } catch (_) {}
   }
 

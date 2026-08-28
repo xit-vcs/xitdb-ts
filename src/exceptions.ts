@@ -8,6 +8,7 @@ export class DatabaseException extends Error {
 export class NotImplementedException extends DatabaseException {}
 export class UnreachableException extends DatabaseException {}
 export class InvalidDatabaseException extends DatabaseException {}
+export class TruncatedDatabaseException extends DatabaseException {}
 export class InvalidVersionException extends DatabaseException {}
 export class InvalidHashSizeException extends DatabaseException {}
 export class KeyNotFoundException extends DatabaseException {}

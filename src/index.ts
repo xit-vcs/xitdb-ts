@@ -15,6 +15,7 @@ export {
   NotImplementedException,
   UnreachableException,
   InvalidDatabaseException,
+  TruncatedDatabaseException,
   InvalidVersionException,
   InvalidHashSizeException,
   KeyNotFoundException,
