@@ -38,6 +38,9 @@ export class CoreMemory implements Core {
   sync(): void {
     // no-op for in-memory
   }
+
+  [Symbol.dispose](): void {
+  }
 }
 
 class RandomAccessMemory implements DataReader, DataWriter {

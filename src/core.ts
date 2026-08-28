@@ -13,7 +13,7 @@ export interface DataWriter {
   writeLong(v: number): void;
 }
 
-export interface Core {
+export interface Core extends Disposable {
   reader(): DataReader;
   writer(): DataWriter;
   length(): number;

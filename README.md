@@ -120,6 +120,8 @@ A `Database` is initialized with an implementation of the `Core` interface, whic
 * `CoreFile` databases use no buffering when reading and writing data. This is almost never necessary but it's useful as a benchmark comparison with `CoreBufferedFile` databases.
 * `CoreMemory` databases work completely in memory.
 
+Every `Core` implements `Disposable`, so use a `using` declaration to release its resources when it leaves scope.
+
 Usually, you want to use a top-level `ArrayList` like in the example above, because that allows you to store a reference to each copy of the database (which I call a "moment"). This is how it supports transactions, despite not having any rollback journal or write-ahead log. It's an append-only database, so the data you are writing is invisible to any reader until the very last step, when the top-level list's header is updated.
 
 You can also use a top-level `HashMap`, which is useful for ephemeral databases where immutability or transaction safety isn't necessary. Since xitdb supports in-memory databases, you could use it as an over-the-wire serialization format. Much like "Cap'n Proto", xitdb has no encoding/decoding step: you just give the buffer to xitdb and it can immediately read from it.

@@ -41,14 +41,14 @@ export class CoreBufferedFile implements Core {
     this.file.sync();
   }
 
-  [Symbol.dispose]() {
-    this.file.file[Symbol.dispose]();
+  [Symbol.dispose](): void {
+    this.file[Symbol.dispose]();
   }
 }
 
 const DEFAULT_BUFFER_SIZE = 8 * 1024 * 1024; // 8MB
 
-class RandomAccessBufferedFile implements DataReader, DataWriter {
+class RandomAccessBufferedFile implements DataReader, DataWriter, Disposable {
   public file: CoreFile;
   private memory: CoreMemory;
   private bufferSize: number; // flushes when the memory is >= this size
@@ -104,6 +104,11 @@ class RandomAccessBufferedFile implements DataReader, DataWriter {
   sync(): void {
     this.flush();
     this.file.sync();
+  }
+
+  [Symbol.dispose](): void {
+    this.flush();
+    this.file[Symbol.dispose]();
   }
 
   // DataWriter interface

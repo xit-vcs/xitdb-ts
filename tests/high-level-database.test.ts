@@ -49,7 +49,7 @@ const MAX_READ_BYTES = 1024;
 
 describe('High Level API', () => {
   test('in-memory storage', () => {
-    const core = new CoreMemory();
+    using core = new CoreMemory();
     const hasher = new Hasher('SHA-1');
     testHighLevelApi(core, hasher, null);
   });
@@ -81,7 +81,7 @@ describe('High Level API', () => {
   test('not using array list at top level', () => {
     // hash map
     {
-      const core = new CoreMemory();
+      using core = new CoreMemory();
       const hasher = new Hasher('SHA-1');
       const db = new Database(core, hasher);
 
@@ -104,7 +104,7 @@ describe('High Level API', () => {
 
     // linked array list is not currently allowed at the top level
     {
-      const core = new CoreMemory();
+      using core = new CoreMemory();
       const hasher = new Hasher('SHA-1');
       const db = new Database(core, hasher);
 
@@ -937,8 +937,8 @@ function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null): 
 
 describe('Compaction', () => {
   test('in-memory storage', () => {
-    const sourceCore = new CoreMemory();
-    const targetCore = new CoreMemory();
+    using sourceCore = new CoreMemory();
+    using targetCore = new CoreMemory();
     const hasher = new Hasher('SHA-1');
     testCompaction(sourceCore, targetCore, hasher, null, null);
   });
@@ -976,7 +976,7 @@ describe('Compaction', () => {
     const sourcePath = join(tmpDir, 'source.db');
     try {
       using sourceCore = new CoreBufferedFile(sourcePath);
-      const targetCore = new CoreMemory();
+      using targetCore = new CoreMemory();
       const hasher = new Hasher('SHA-1');
       testCompaction(sourceCore, targetCore, hasher, sourcePath, null);
     } finally {
@@ -1331,7 +1331,7 @@ function testCompaction(
 }
 describe('Sorted Map', () => {
   test('in-memory storage', () => {
-    const core = new CoreMemory();
+    using core = new CoreMemory();
     testSortedMap(core, new Hasher('SHA-1'));
   });
 
@@ -1561,7 +1561,7 @@ function testSortedMap(core: Core, hasher: Hasher): void {
 
 describe('Iterator From Index', () => {
   test('in-memory storage', () => {
-    const core = new CoreMemory();
+    using core = new CoreMemory();
     testIteratorFrom(core, new Hasher('SHA-1'));
   });
 

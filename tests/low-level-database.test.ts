@@ -41,13 +41,13 @@ import {
 } from '../src';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync } from 'fs';
 
 const MAX_READ_BYTES = 1024;
 
 describe('Low Level API', () => {
   test('in-memory storage', () => {
-    const core = new CoreMemory();
+    using core = new CoreMemory();
     const hasher = new Hasher('SHA-1');
     testLowLevelApi(core, hasher);
   });
@@ -76,8 +76,22 @@ describe('Low Level API', () => {
     }
   }, 20000);
 
+  test('buffered file disposal flushes pending writes', () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-'));
+    const filePath = join(tmpDir, 'test.db');
+    try {
+      {
+        using core: Core = new CoreBufferedFile(filePath);
+        core.writer().write(new Uint8Array([1, 2, 3]));
+      }
+      assert.deepStrictEqual(readFileSync(filePath), Buffer.from([1, 2, 3]));
+    } finally {
+      rmSync(tmpDir, { recursive: true });
+    }
+  });
+
   test('low level memory operations', () => {
-    const core = new CoreMemory();
+    using core = new CoreMemory();
     const hasher = new Hasher('SHA-1');
     const db = new Database(core, hasher);
 

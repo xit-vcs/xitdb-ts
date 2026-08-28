@@ -50,7 +50,7 @@ export class CoreFile implements Core {
     fs.fsyncSync(this.fd);
   }
 
-  [Symbol.dispose]() {
+  [Symbol.dispose](): void {
     fs.closeSync(this.fd);
   }
 }
