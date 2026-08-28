@@ -1616,7 +1616,8 @@ export class Database {
     targetWriter.write(new Uint8Array(INDEX_BLOCK_SIZE));
 
     // recursively remap the moment slot
-    const remappedMoment = remapSlot(this.core, targetCore, this.header.hashSize, offsetMap, momentSlot);
+    const compactor = new Compactor(this.core, targetCore, this.header.hashSize, offsetMap);
+    const remappedMoment = compactor.remapSlot(momentSlot);
 
     // write remapped moment slot into position 0 of target's root index block
     targetCore.seek(targetArrayListPtr);
@@ -3015,460 +3016,392 @@ export class Database {
 
 // compaction helpers
 
-function reserveBlock(targetCore: Core, size: number): number {
-  const offset = targetCore.length();
-  targetCore.seek(offset);
-  targetCore.writer().write(new Uint8Array(size));
-  return offset;
-}
+class Compactor {
+  constructor(
+    private readonly sourceCore: Core,
+    private readonly targetCore: Core,
+    private readonly hashSize: number,
+    private readonly offsetMap: Map<number, number>
+  ) {}
 
-function remapSlot(
-  sourceCore: Core,
-  targetCore: Core,
-  hashSize: number,
-  offsetMap: Map<number, number>,
-  slot: Slot
-): Slot {
-  switch (slot.tag) {
-    case Tag.NONE:
-    case Tag.UINT:
-    case Tag.INT:
-    case Tag.FLOAT:
-    case Tag.SHORT_BYTES:
-      return slot;
-    case Tag.BYTES: {
-      const mapped = offsetMap.get(Number(slot.value));
-      if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
-      const newOffset = remapBytes(sourceCore, targetCore, offsetMap, slot);
-      return new Slot(newOffset, slot.tag, slot.full);
-    }
-    case Tag.INDEX: {
-      const mapped = offsetMap.get(Number(slot.value));
-      if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
-      const newOffset = remapIndex(sourceCore, targetCore, hashSize, offsetMap, slot);
-      return new Slot(newOffset, slot.tag, slot.full);
-    }
-    case Tag.ARRAY_LIST: {
-      const mapped = offsetMap.get(Number(slot.value));
-      if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
-      const newOffset = remapArrayList(sourceCore, targetCore, hashSize, offsetMap, slot);
-      return new Slot(newOffset, slot.tag, slot.full);
-    }
-    case Tag.LINKED_ARRAY_LIST: {
-      const mapped = offsetMap.get(Number(slot.value));
-      if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
-      const newOffset = remapBTree(sourceCore, targetCore, hashSize, offsetMap, slot);
-      return new Slot(newOffset, slot.tag, slot.full);
-    }
-    case Tag.HASH_MAP:
-    case Tag.HASH_SET: {
-      const mapped = offsetMap.get(Number(slot.value));
-      if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
-      const newOffset = remapHashMapOrSet(sourceCore, targetCore, hashSize, offsetMap, slot, false);
-      return new Slot(newOffset, slot.tag, slot.full);
-    }
-    case Tag.COUNTED_HASH_MAP:
-    case Tag.COUNTED_HASH_SET: {
-      const mapped = offsetMap.get(Number(slot.value));
-      if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
-      const newOffset = remapHashMapOrSet(sourceCore, targetCore, hashSize, offsetMap, slot, true);
-      return new Slot(newOffset, slot.tag, slot.full);
-    }
-    case Tag.KV_PAIR: {
-      const mapped = offsetMap.get(Number(slot.value));
-      if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
-      const newOffset = remapKvPair(sourceCore, targetCore, hashSize, offsetMap, slot);
-      return new Slot(newOffset, slot.tag, slot.full);
-    }
-    case Tag.SORTED_MAP:
-    case Tag.SORTED_SET: {
-      const mapped = offsetMap.get(Number(slot.value));
-      if (mapped !== undefined) return new Slot(mapped, slot.tag, slot.full);
-      const newOffset = remapSortedMap(sourceCore, targetCore, hashSize, offsetMap, slot);
-      return new Slot(newOffset, slot.tag, slot.full);
-    }
-    default:
-      throw new UnexpectedTagException();
-  }
-}
-
-function remapBytes(
-  sourceCore: Core,
-  targetCore: Core,
-  offsetMap: Map<number, number>,
-  slot: Slot
-): number {
-  sourceCore.seek(Number(slot.value));
-  const sourceReader = sourceCore.reader();
-  const length = sourceReader.readLong();
-
-  // total size: 8-byte length + bytes + optional 2-byte format_tag
-  const formatTagSize = slot.full ? 2 : 0;
-  const totalPayload = length + formatTagSize;
-
-  const newOffset = targetCore.length();
-  targetCore.seek(newOffset);
-  const targetWriter = targetCore.writer();
-  targetWriter.writeLong(length);
-
-  // copy bytes in chunks
-  let remaining = totalPayload;
-  while (remaining > 0) {
-    const chunk = Math.min(remaining, 4096);
-    const buf = new Uint8Array(chunk);
-    sourceReader.readFully(buf);
-    targetWriter.write(buf);
-    remaining -= chunk;
+  private reserveBlock(size: number): number {
+    const offset = this.targetCore.length();
+    this.targetCore.seek(offset);
+    this.targetCore.writer().write(new Uint8Array(size));
+    return offset;
   }
 
-  offsetMap.set(Number(slot.value), newOffset);
-  return newOffset;
-}
+  private visitObject(
+    sourceOffset: number,
+    size: number,
+    populate: (sourceOffset: number, targetOffset: number) => void
+  ): number {
+    const mapped = this.offsetMap.get(sourceOffset);
+    if (mapped !== undefined) return mapped;
 
-function remapIndex(
-  sourceCore: Core,
-  targetCore: Core,
-  hashSize: number,
-  offsetMap: Map<number, number>,
-  slot: Slot
-): number {
-  // read 144-byte block (16 slots)
-  sourceCore.seek(Number(slot.value));
-  const sourceReader = sourceCore.reader();
-  const blockBytes = new Uint8Array(INDEX_BLOCK_SIZE);
-  sourceReader.readFully(blockBytes);
-
-  const newOffset = reserveBlock(targetCore, INDEX_BLOCK_SIZE);
-  offsetMap.set(Number(slot.value), newOffset);
-
-  // remap each slot
-  const remappedSlots: Slot[] = [];
-  for (let i = 0; i < SLOT_COUNT; i++) {
-    const slotBytes = blockBytes.slice(i * Slot.LENGTH, (i + 1) * Slot.LENGTH);
-    const childSlot = Slot.fromBytes(slotBytes);
-    remappedSlots.push(remapSlot(sourceCore, targetCore, hashSize, offsetMap, childSlot));
+    const targetOffset = this.reserveBlock(size);
+    this.offsetMap.set(sourceOffset, targetOffset);
+    populate(sourceOffset, targetOffset);
+    return targetOffset;
   }
 
-  // write remapped block to target
-  targetCore.seek(newOffset);
-  const targetWriter = targetCore.writer();
-  for (const s of remappedSlots) {
-    targetWriter.write(s.toBytes());
-  }
-
-  return newOffset;
-}
-
-function remapArrayList(
-  sourceCore: Core,
-  targetCore: Core,
-  hashSize: number,
-  offsetMap: Map<number, number>,
-  slot: Slot
-): number {
-  // read ArrayListHeader (16 bytes)
-  sourceCore.seek(Number(slot.value));
-  const sourceReader = sourceCore.reader();
-  const headerBytes = new Uint8Array(ArrayListHeader.LENGTH);
-  sourceReader.readFully(headerBytes);
-  const header = ArrayListHeader.fromBytes(headerBytes);
-
-  const newOffset = reserveBlock(targetCore, ArrayListHeader.LENGTH);
-  offsetMap.set(Number(slot.value), newOffset);
-
-  // remap root index block pointer via remapSlot as an .index slot
-  const indexSlot = new Slot(header.ptr, Tag.INDEX);
-  const remappedIndex = remapSlot(sourceCore, targetCore, hashSize, offsetMap, indexSlot);
-
-  // write new ArrayListHeader with remapped ptr
-  targetCore.seek(newOffset);
-  const targetWriter = targetCore.writer();
-  targetWriter.write(new ArrayListHeader(Number(remappedIndex.value), header.size).toBytes());
-
-  return newOffset;
-}
-
-function remapBTree(
-  sourceCore: Core,
-  targetCore: Core,
-  hashSize: number,
-  offsetMap: Map<number, number>,
-  slot: Slot
-): number {
-  sourceCore.seek(Number(slot.value));
-  const sourceReader = sourceCore.reader();
-  const headerBytes = new Uint8Array(BTreeHeader.LENGTH);
-  sourceReader.readFully(headerBytes);
-  const header = BTreeHeader.fromBytes(headerBytes);
-
-  const newOffset = reserveBlock(targetCore, BTreeHeader.LENGTH);
-  offsetMap.set(Number(slot.value), newOffset);
-
-  const remappedRoot = remapBTreeNode(sourceCore, targetCore, hashSize, offsetMap, header.rootPtr);
-
-  targetCore.seek(newOffset);
-  const targetWriter = targetCore.writer();
-  targetWriter.write(new BTreeHeader(remappedRoot, header.size).toBytes());
-
-  return newOffset;
-}
-
-function remapBTreeNode(
-  sourceCore: Core,
-  targetCore: Core,
-  hashSize: number,
-  offsetMap: Map<number, number>,
-  nodeOffset: number
-): number {
-  // dedup check (subtrees are shared by pointer)
-  const mapped = offsetMap.get(nodeOffset);
-  if (mapped !== undefined) return mapped;
-
-  sourceCore.seek(nodeOffset);
-  const sourceReader = sourceCore.reader();
-  const nodeHeader = new Uint8Array(BTREE_NODE_HEADER_SIZE);
-  sourceReader.readFully(nodeHeader);
-  const kindInt = nodeHeader[0];
-  if (kindInt > BTreeNodeKind.BRANCH) throw new InvalidBTreeNodeKindException();
-  const kind = kindInt as BTreeNodeKind;
-  const num = nodeHeader[1];
-  if (num > BTREE_SLOT_COUNT) throw new InvalidBTreeNodeException();
-
-  switch (kind) {
-    case BTreeNodeKind.LEAF: {
-      const body = new Uint8Array(Slot.LENGTH * BTREE_SLOT_COUNT);
-      sourceReader.readFully(body);
-
-      const newOffset = reserveBlock(targetCore, BTREE_LEAF_BLOCK_SIZE);
-      offsetMap.set(nodeOffset, newOffset);
-
-      const slots: Slot[] = [];
-      for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
-        const valueSlot = Slot.fromBytes(body.slice(i * Slot.LENGTH, i * Slot.LENGTH + Slot.LENGTH));
-        slots.push(remapSlot(sourceCore, targetCore, hashSize, offsetMap, valueSlot));
+  remapSlot(slot: Slot): Slot {
+    switch (slot.tag) {
+      case Tag.NONE:
+      case Tag.UINT:
+      case Tag.INT:
+      case Tag.FLOAT:
+      case Tag.SHORT_BYTES:
+        return slot;
+      case Tag.BYTES: {
+        const newOffset = this.remapBytes(slot);
+        return new Slot(newOffset, slot.tag, slot.full);
       }
-
-      targetCore.seek(newOffset);
-      const targetWriter = targetCore.writer();
-      targetWriter.write(new Uint8Array([kindInt, num]));
-      for (const s of slots) targetWriter.write(s.toBytes());
-
-      return newOffset;
-    }
-    case BTreeNodeKind.BRANCH: {
-      const body = new Uint8Array((Slot.LENGTH + 8) * BTREE_SLOT_COUNT);
-      sourceReader.readFully(body);
-      const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
-
-      const newOffset = reserveBlock(targetCore, BTREE_BRANCH_BLOCK_SIZE);
-      offsetMap.set(nodeOffset, newOffset);
-
-      const children: Slot[] = [];
-      for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
-        const child = Slot.fromBytes(body.slice(i * Slot.LENGTH, i * Slot.LENGTH + Slot.LENGTH));
-        if (child.tag === Tag.INDEX) {
-          const remappedPtr = remapBTreeNode(sourceCore, targetCore, hashSize, offsetMap, Number(child.value));
-          children.push(new Slot(remappedPtr, Tag.INDEX, child.full));
-        } else {
-          children.push(child);
-        }
+      case Tag.INDEX: {
+        const newOffset = this.visitObject(Number(slot.value), INDEX_BLOCK_SIZE, (source, target) => this.populateIndex(source, target));
+        return new Slot(newOffset, slot.tag, slot.full);
       }
-      const countsOffset = Slot.LENGTH * BTREE_SLOT_COUNT;
-      const counts: number[] = [];
-      for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
-        counts.push(Number(view.getBigInt64(countsOffset + i * 8, false)));
+      case Tag.ARRAY_LIST: {
+        const newOffset = this.visitObject(Number(slot.value), ArrayListHeader.LENGTH, (source, target) => this.populateArrayList(source, target));
+        return new Slot(newOffset, slot.tag, slot.full);
       }
-
-      targetCore.seek(newOffset);
-      const targetWriter = targetCore.writer();
-      targetWriter.write(new Uint8Array([kindInt, num]));
-      for (const s of children) targetWriter.write(s.toBytes());
-      for (const c of counts) targetWriter.writeLong(c);
-
-      return newOffset;
+      case Tag.LINKED_ARRAY_LIST: {
+        const newOffset = this.visitObject(Number(slot.value), BTreeHeader.LENGTH, (source, target) => this.populateBTree(source, target));
+        return new Slot(newOffset, slot.tag, slot.full);
+      }
+      case Tag.HASH_MAP:
+      case Tag.HASH_SET: {
+        const newOffset = this.visitObject(Number(slot.value), INDEX_BLOCK_SIZE, (source, target) => this.populateHashMapOrSet(source, target, false));
+        return new Slot(newOffset, slot.tag, slot.full);
+      }
+      case Tag.COUNTED_HASH_MAP:
+      case Tag.COUNTED_HASH_SET: {
+        const newOffset = this.visitObject(Number(slot.value), INDEX_BLOCK_SIZE + 8, (source, target) => this.populateHashMapOrSet(source, target, true));
+        return new Slot(newOffset, slot.tag, slot.full);
+      }
+      case Tag.KV_PAIR: {
+        const newOffset = this.visitObject(Number(slot.value), KeyValuePair.length(this.hashSize), (source, target) => this.populateKvPair(source, target));
+        return new Slot(newOffset, slot.tag, slot.full);
+      }
+      case Tag.SORTED_MAP:
+      case Tag.SORTED_SET: {
+        const newOffset = this.visitObject(Number(slot.value), BTreeHeader.LENGTH, (source, target) => this.populateSortedMap(source, target));
+        return new Slot(newOffset, slot.tag, slot.full);
+      }
+      default:
+        throw new UnexpectedTagException();
     }
   }
-  throw new UnreachableException();
-}
 
-function remapSortedMap(
-  sourceCore: Core,
-  targetCore: Core,
-  hashSize: number,
-  offsetMap: Map<number, number>,
-  slot: Slot
-): number {
-  sourceCore.seek(Number(slot.value));
-  const sourceReader = sourceCore.reader();
-  const headerBytes = new Uint8Array(BTreeHeader.LENGTH);
-  sourceReader.readFully(headerBytes);
-  const header = BTreeHeader.fromBytes(headerBytes);
+  private remapBytes(slot: Slot): number {
+    const mapped = this.offsetMap.get(Number(slot.value));
+    if (mapped !== undefined) return mapped;
 
-  const newOffset = reserveBlock(targetCore, BTreeHeader.LENGTH);
-  offsetMap.set(Number(slot.value), newOffset);
+    this.sourceCore.seek(Number(slot.value));
+    const sourceReader = this.sourceCore.reader();
+    const length = sourceReader.readLong();
 
-  const remappedRoot = remapSortedMapNode(sourceCore, targetCore, hashSize, offsetMap, header.rootPtr);
+    // total size: 8-byte length + bytes + optional 2-byte format_tag
+    const formatTagSize = slot.full ? 2 : 0;
+    const totalPayload = length + formatTagSize;
 
-  targetCore.seek(newOffset);
-  const targetWriter = targetCore.writer();
-  targetWriter.write(new BTreeHeader(remappedRoot, header.size).toBytes());
+    const newOffset = this.targetCore.length();
+    this.targetCore.seek(newOffset);
+    const targetWriter = this.targetCore.writer();
+    targetWriter.writeLong(length);
 
-  return newOffset;
-}
-
-function remapSortedMapNode(
-  sourceCore: Core,
-  targetCore: Core,
-  hashSize: number,
-  offsetMap: Map<number, number>,
-  nodeOffset: number
-): number {
-  const mapped = offsetMap.get(nodeOffset);
-  if (mapped !== undefined) return mapped;
-
-  sourceCore.seek(nodeOffset);
-  const sourceReader = sourceCore.reader();
-  const nodeHeader = new Uint8Array(BTREE_NODE_HEADER_SIZE);
-  sourceReader.readFully(nodeHeader);
-  const kindInt = nodeHeader[0];
-  if (kindInt > BTreeNodeKind.BRANCH) throw new InvalidBTreeNodeKindException();
-  const kind = kindInt as BTreeNodeKind;
-  const num = nodeHeader[1];
-  if (num > BTREE_SLOT_COUNT) throw new InvalidBTreeNodeException();
-
-  switch (kind) {
-    case BTreeNodeKind.LEAF: {
-      const body = new Uint8Array(Slot.LENGTH * BTREE_SLOT_COUNT);
-      sourceReader.readFully(body);
-
-      const newOffset = reserveBlock(targetCore, SORTED_LEAF_BLOCK_SIZE);
-      offsetMap.set(nodeOffset, newOffset);
-
-      const entries: Slot[] = [];
-      for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
-        const entry = Slot.fromBytes(body.slice(i * Slot.LENGTH, i * Slot.LENGTH + Slot.LENGTH));
-        entries.push(remapSlot(sourceCore, targetCore, hashSize, offsetMap, entry));
-      }
-
-      targetCore.seek(newOffset);
-      const targetWriter = targetCore.writer();
-      targetWriter.write(new Uint8Array([kindInt, num]));
-      for (const s of entries) targetWriter.write(s.toBytes());
-
-      return newOffset;
+    // copy bytes in chunks
+    let remaining = totalPayload;
+    while (remaining > 0) {
+      const chunk = Math.min(remaining, 4096);
+      const buf = new Uint8Array(chunk);
+      sourceReader.readFully(buf);
+      targetWriter.write(buf);
+      remaining -= chunk;
     }
-    case BTreeNodeKind.BRANCH: {
-      const body = new Uint8Array((Slot.LENGTH * 2 + 8) * BTREE_SLOT_COUNT);
-      sourceReader.readFully(body);
-      const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
 
-      const newOffset = reserveBlock(targetCore, SORTED_BRANCH_BLOCK_SIZE);
-      offsetMap.set(nodeOffset, newOffset);
+    this.offsetMap.set(Number(slot.value), newOffset);
+    return newOffset;
+  }
 
-      const children: Slot[] = [];
-      for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
-        const child = Slot.fromBytes(body.slice(i * Slot.LENGTH, i * Slot.LENGTH + Slot.LENGTH));
-        if (child.tag === Tag.INDEX) {
-          const remappedPtr = remapSortedMapNode(sourceCore, targetCore, hashSize, offsetMap, Number(child.value));
-          children.push(new Slot(remappedPtr, Tag.INDEX, child.full));
-        } else {
-          children.push(child);
-        }
-      }
-      const sepOffset = Slot.LENGTH * BTREE_SLOT_COUNT;
-      const separators: Slot[] = [];
-      for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
-        const sep = Slot.fromBytes(body.slice(sepOffset + i * Slot.LENGTH, sepOffset + i * Slot.LENGTH + Slot.LENGTH));
-        separators.push(remapSlot(sourceCore, targetCore, hashSize, offsetMap, sep));
-      }
-      const countsOffset = Slot.LENGTH * 2 * BTREE_SLOT_COUNT;
-      const counts: number[] = [];
-      for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
-        counts.push(Number(view.getBigInt64(countsOffset + i * 8, false)));
-      }
+  private populateIndex(sourceOffset: number, targetOffset: number): void {
+    // read 144-byte block (16 slots)
+    this.sourceCore.seek(sourceOffset);
+    const sourceReader = this.sourceCore.reader();
+    const blockBytes = new Uint8Array(INDEX_BLOCK_SIZE);
+    sourceReader.readFully(blockBytes);
 
-      targetCore.seek(newOffset);
-      const targetWriter = targetCore.writer();
-      targetWriter.write(new Uint8Array([kindInt, num]));
-      for (const s of children) targetWriter.write(s.toBytes());
-      for (const s of separators) targetWriter.write(s.toBytes());
-      for (const c of counts) targetWriter.writeLong(c);
+    // remap each slot
+    const remappedSlots: Slot[] = [];
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const slotBytes = blockBytes.slice(i * Slot.LENGTH, (i + 1) * Slot.LENGTH);
+      const childSlot = Slot.fromBytes(slotBytes);
+      remappedSlots.push(this.remapSlot(childSlot));
+    }
 
-      return newOffset;
+    // write remapped block to target
+    this.targetCore.seek(targetOffset);
+    const targetWriter = this.targetCore.writer();
+    for (const s of remappedSlots) {
+      targetWriter.write(s.toBytes());
     }
   }
-  throw new UnreachableException();
-}
 
-function remapHashMapOrSet(
-  sourceCore: Core,
-  targetCore: Core,
-  hashSize: number,
-  offsetMap: Map<number, number>,
-  slot: Slot,
-  counted: boolean
-): number {
-  sourceCore.seek(Number(slot.value));
-  const sourceReader = sourceCore.reader();
+  private populateArrayList(sourceOffset: number, targetOffset: number): void {
+    // read ArrayListHeader (16 bytes)
+    this.sourceCore.seek(sourceOffset);
+    const sourceReader = this.sourceCore.reader();
+    const headerBytes = new Uint8Array(ArrayListHeader.LENGTH);
+    sourceReader.readFully(headerBytes);
+    const header = ArrayListHeader.fromBytes(headerBytes);
 
-  let countValue = -1;
-  if (counted) {
-    countValue = sourceReader.readLong();
+    // remap root index block pointer via remapSlot as an .index slot
+    const indexSlot = new Slot(header.ptr, Tag.INDEX);
+    const remappedIndex = this.remapSlot(indexSlot);
+
+    // write new ArrayListHeader with remapped ptr
+    this.targetCore.seek(targetOffset);
+    const targetWriter = this.targetCore.writer();
+    targetWriter.write(new ArrayListHeader(Number(remappedIndex.value), header.size).toBytes());
   }
 
-  // read 144-byte root index block
-  const blockBytes = new Uint8Array(INDEX_BLOCK_SIZE);
-  sourceReader.readFully(blockBytes);
+  private populateBTree(sourceOffset: number, targetOffset: number): void {
+    this.sourceCore.seek(sourceOffset);
+    const sourceReader = this.sourceCore.reader();
+    const headerBytes = new Uint8Array(BTreeHeader.LENGTH);
+    sourceReader.readFully(headerBytes);
+    const header = BTreeHeader.fromBytes(headerBytes);
 
-  const newOffset = reserveBlock(targetCore, INDEX_BLOCK_SIZE + (counted ? 8 : 0));
-  offsetMap.set(Number(slot.value), newOffset);
+    const remappedRoot = this.remapBTreeNode(header.rootPtr);
 
-  // remap each child slot in the block
-  const remappedSlots: Slot[] = [];
-  for (let i = 0; i < SLOT_COUNT; i++) {
-    const slotBytes = blockBytes.slice(i * Slot.LENGTH, (i + 1) * Slot.LENGTH);
-    const childSlot = Slot.fromBytes(slotBytes);
-    remappedSlots.push(remapSlot(sourceCore, targetCore, hashSize, offsetMap, childSlot));
+    this.targetCore.seek(targetOffset);
+    const targetWriter = this.targetCore.writer();
+    targetWriter.write(new BTreeHeader(remappedRoot, header.size).toBytes());
   }
 
-  // write [optional count][remapped block] contiguously to target
-  targetCore.seek(newOffset);
-  const targetWriter = targetCore.writer();
-  if (counted) {
-    targetWriter.writeLong(countValue);
+  private remapBTreeNode(nodeOffset: number): number {
+    // dedup check (subtrees are shared by pointer)
+    const mapped = this.offsetMap.get(nodeOffset);
+    if (mapped !== undefined) return mapped;
+
+    this.sourceCore.seek(nodeOffset);
+    const sourceReader = this.sourceCore.reader();
+    const nodeHeader = new Uint8Array(BTREE_NODE_HEADER_SIZE);
+    sourceReader.readFully(nodeHeader);
+    const kindInt = nodeHeader[0];
+    if (kindInt > BTreeNodeKind.BRANCH) throw new InvalidBTreeNodeKindException();
+    const kind = kindInt as BTreeNodeKind;
+    const num = nodeHeader[1];
+    if (num > BTREE_SLOT_COUNT) throw new InvalidBTreeNodeException();
+
+    switch (kind) {
+      case BTreeNodeKind.LEAF: {
+        return this.visitObject(nodeOffset, BTREE_LEAF_BLOCK_SIZE, (source, target) =>
+          this.populateBTreeLeaf(source, target, kindInt, num)
+        );
+      }
+      case BTreeNodeKind.BRANCH: {
+        return this.visitObject(nodeOffset, BTREE_BRANCH_BLOCK_SIZE, (source, target) =>
+          this.populateBTreeBranch(source, target, kindInt, num)
+        );
+      }
+    }
+    throw new UnreachableException();
   }
-  for (const s of remappedSlots) {
-    targetWriter.write(s.toBytes());
+
+  private populateBTreeLeaf(sourceOffset: number, targetOffset: number, kind: number, num: number): void {
+    this.sourceCore.seek(sourceOffset + BTREE_NODE_HEADER_SIZE);
+    const sourceReader = this.sourceCore.reader();
+    const body = new Uint8Array(Slot.LENGTH * BTREE_SLOT_COUNT);
+    sourceReader.readFully(body);
+
+    const slots: Slot[] = [];
+    for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
+      const valueSlot = Slot.fromBytes(body.slice(i * Slot.LENGTH, i * Slot.LENGTH + Slot.LENGTH));
+      slots.push(this.remapSlot(valueSlot));
+    }
+
+    this.targetCore.seek(targetOffset);
+    const targetWriter = this.targetCore.writer();
+    targetWriter.write(new Uint8Array([kind, num]));
+    for (const slot of slots) targetWriter.write(slot.toBytes());
   }
 
-  return newOffset;
-}
+  private populateBTreeBranch(sourceOffset: number, targetOffset: number, kind: number, num: number): void {
+    this.sourceCore.seek(sourceOffset + BTREE_NODE_HEADER_SIZE);
+    const sourceReader = this.sourceCore.reader();
+    const body = new Uint8Array((Slot.LENGTH + 8) * BTREE_SLOT_COUNT);
+    sourceReader.readFully(body);
+    const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
 
-function remapKvPair(
-  sourceCore: Core,
-  targetCore: Core,
-  hashSize: number,
-  offsetMap: Map<number, number>,
-  slot: Slot
-): number {
-  // read KeyValuePair
-  sourceCore.seek(Number(slot.value));
-  const sourceReader = sourceCore.reader();
-  const kvPairBytes = new Uint8Array(KeyValuePair.length(hashSize));
-  sourceReader.readFully(kvPairBytes);
-  const kvPair = KeyValuePair.fromBytes(kvPairBytes, hashSize);
+    const children: Slot[] = [];
+    for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
+      const child = Slot.fromBytes(body.slice(i * Slot.LENGTH, i * Slot.LENGTH + Slot.LENGTH));
+      if (child.tag === Tag.INDEX) {
+        const remappedPtr = this.remapBTreeNode(Number(child.value));
+        children.push(new Slot(remappedPtr, Tag.INDEX, child.full));
+      } else {
+        children.push(child);
+      }
+    }
+    const countsOffset = Slot.LENGTH * BTREE_SLOT_COUNT;
+    const counts: number[] = [];
+    for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
+      counts.push(Number(view.getBigInt64(countsOffset + i * 8, false)));
+    }
 
-  const newOffset = reserveBlock(targetCore, KeyValuePair.length(hashSize));
-  offsetMap.set(Number(slot.value), newOffset);
+    this.targetCore.seek(targetOffset);
+    const targetWriter = this.targetCore.writer();
+    targetWriter.write(new Uint8Array([kind, num]));
+    for (const child of children) targetWriter.write(child.toBytes());
+    for (const count of counts) targetWriter.writeLong(count);
+  }
 
-  // remap key_slot and value_slot
-  const remappedKey = remapSlot(sourceCore, targetCore, hashSize, offsetMap, kvPair.keySlot);
-  const remappedValue = remapSlot(sourceCore, targetCore, hashSize, offsetMap, kvPair.valueSlot);
+  private populateSortedMap(sourceOffset: number, targetOffset: number): void {
+    this.sourceCore.seek(sourceOffset);
+    const sourceReader = this.sourceCore.reader();
+    const headerBytes = new Uint8Array(BTreeHeader.LENGTH);
+    sourceReader.readFully(headerBytes);
+    const header = BTreeHeader.fromBytes(headerBytes);
 
-  // write remapped KV pair (hash stays unchanged)
-  targetCore.seek(newOffset);
-  const targetWriter = targetCore.writer();
-  targetWriter.write(new KeyValuePair(remappedValue, remappedKey, kvPair.hash).toBytes());
+    const remappedRoot = this.remapSortedMapNode(header.rootPtr);
 
-  return newOffset;
+    this.targetCore.seek(targetOffset);
+    const targetWriter = this.targetCore.writer();
+    targetWriter.write(new BTreeHeader(remappedRoot, header.size).toBytes());
+  }
+
+  private remapSortedMapNode(nodeOffset: number): number {
+    const mapped = this.offsetMap.get(nodeOffset);
+    if (mapped !== undefined) return mapped;
+
+    this.sourceCore.seek(nodeOffset);
+    const sourceReader = this.sourceCore.reader();
+    const nodeHeader = new Uint8Array(BTREE_NODE_HEADER_SIZE);
+    sourceReader.readFully(nodeHeader);
+    const kindInt = nodeHeader[0];
+    if (kindInt > BTreeNodeKind.BRANCH) throw new InvalidBTreeNodeKindException();
+    const kind = kindInt as BTreeNodeKind;
+    const num = nodeHeader[1];
+    if (num > BTREE_SLOT_COUNT) throw new InvalidBTreeNodeException();
+
+    switch (kind) {
+      case BTreeNodeKind.LEAF: {
+        return this.visitObject(nodeOffset, SORTED_LEAF_BLOCK_SIZE, (source, target) =>
+          this.populateSortedMapLeaf(source, target, kindInt, num)
+        );
+      }
+      case BTreeNodeKind.BRANCH: {
+        return this.visitObject(nodeOffset, SORTED_BRANCH_BLOCK_SIZE, (source, target) =>
+          this.populateSortedMapBranch(source, target, kindInt, num)
+        );
+      }
+    }
+    throw new UnreachableException();
+  }
+
+  private populateSortedMapLeaf(sourceOffset: number, targetOffset: number, kind: number, num: number): void {
+    this.sourceCore.seek(sourceOffset + BTREE_NODE_HEADER_SIZE);
+    const sourceReader = this.sourceCore.reader();
+    const body = new Uint8Array(Slot.LENGTH * BTREE_SLOT_COUNT);
+    sourceReader.readFully(body);
+
+    const entries: Slot[] = [];
+    for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
+      const entry = Slot.fromBytes(body.slice(i * Slot.LENGTH, i * Slot.LENGTH + Slot.LENGTH));
+      entries.push(this.remapSlot(entry));
+    }
+
+    this.targetCore.seek(targetOffset);
+    const targetWriter = this.targetCore.writer();
+    targetWriter.write(new Uint8Array([kind, num]));
+    for (const entry of entries) targetWriter.write(entry.toBytes());
+  }
+
+  private populateSortedMapBranch(sourceOffset: number, targetOffset: number, kind: number, num: number): void {
+    this.sourceCore.seek(sourceOffset + BTREE_NODE_HEADER_SIZE);
+    const sourceReader = this.sourceCore.reader();
+    const body = new Uint8Array((Slot.LENGTH * 2 + 8) * BTREE_SLOT_COUNT);
+    sourceReader.readFully(body);
+    const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
+
+    const children: Slot[] = [];
+    for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
+      const child = Slot.fromBytes(body.slice(i * Slot.LENGTH, i * Slot.LENGTH + Slot.LENGTH));
+      if (child.tag === Tag.INDEX) {
+        const remappedPtr = this.remapSortedMapNode(Number(child.value));
+        children.push(new Slot(remappedPtr, Tag.INDEX, child.full));
+      } else {
+        children.push(child);
+      }
+    }
+    const separatorOffset = Slot.LENGTH * BTREE_SLOT_COUNT;
+    const separators: Slot[] = [];
+    for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
+      const separator = Slot.fromBytes(body.slice(separatorOffset + i * Slot.LENGTH, separatorOffset + (i + 1) * Slot.LENGTH));
+      separators.push(this.remapSlot(separator));
+    }
+    const countsOffset = Slot.LENGTH * 2 * BTREE_SLOT_COUNT;
+    const counts: number[] = [];
+    for (let i = 0; i < BTREE_SLOT_COUNT; i++) {
+      counts.push(Number(view.getBigInt64(countsOffset + i * 8, false)));
+    }
+
+    this.targetCore.seek(targetOffset);
+    const targetWriter = this.targetCore.writer();
+    targetWriter.write(new Uint8Array([kind, num]));
+    for (const child of children) targetWriter.write(child.toBytes());
+    for (const separator of separators) targetWriter.write(separator.toBytes());
+    for (const count of counts) targetWriter.writeLong(count);
+  }
+
+  private populateHashMapOrSet(sourceOffset: number, targetOffset: number, counted: boolean): void {
+    this.sourceCore.seek(sourceOffset);
+    const sourceReader = this.sourceCore.reader();
+
+    let countValue = -1;
+    if (counted) {
+      countValue = sourceReader.readLong();
+    }
+
+    // read 144-byte root index block
+    const blockBytes = new Uint8Array(INDEX_BLOCK_SIZE);
+    sourceReader.readFully(blockBytes);
+
+    // remap each child slot in the block
+    const remappedSlots: Slot[] = [];
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const slotBytes = blockBytes.slice(i * Slot.LENGTH, (i + 1) * Slot.LENGTH);
+      const childSlot = Slot.fromBytes(slotBytes);
+      remappedSlots.push(this.remapSlot(childSlot));
+    }
+
+    // write [optional count][remapped block] contiguously to target
+    this.targetCore.seek(targetOffset);
+    const targetWriter = this.targetCore.writer();
+    if (counted) {
+      targetWriter.writeLong(countValue);
+    }
+    for (const s of remappedSlots) {
+      targetWriter.write(s.toBytes());
+    }
+  }
+
+  private populateKvPair(sourceOffset: number, targetOffset: number): void {
+    // read KeyValuePair
+    this.sourceCore.seek(sourceOffset);
+    const sourceReader = this.sourceCore.reader();
+    const kvPairBytes = new Uint8Array(KeyValuePair.length(this.hashSize));
+    sourceReader.readFully(kvPairBytes);
+    const kvPair = KeyValuePair.fromBytes(kvPairBytes, this.hashSize);
+
+    // remap key_slot and value_slot
+    const remappedKey = this.remapSlot(kvPair.keySlot);
+    const remappedValue = this.remapSlot(kvPair.valueSlot);
+
+    // write remapped KV pair (hash stays unchanged)
+    this.targetCore.seek(targetOffset);
+    const targetWriter = this.targetCore.writer();
+    targetWriter.write(new KeyValuePair(remappedValue, remappedKey, kvPair.hash).toBytes());
+  }
 }
