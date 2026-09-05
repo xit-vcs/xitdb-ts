@@ -608,7 +608,7 @@ export class ArrayListSlice implements PathPartBase {
     reader.readFully(headerBytes);
     const origHeader = ArrayListHeader.fromBytes(headerBytes);
 
-    const sliceHeader = db.readArrayListSlice(origHeader, this.size);
+    const sliceHeader = db.readArrayListSlice(origHeader, this.size, isTopLevel);
     const finalSlotPtr = db.readSlotPointer(writeMode, path, pathI + 1, slotPtr);
 
     // if top level, updating the header below commits the transaction,
@@ -2071,7 +2071,7 @@ export class Database {
     }
   }
 
-  readArrayListSlice(header: ArrayListHeader, size: number): ArrayListHeader {
+  readArrayListSlice(header: ArrayListHeader, size: number, isTopLevel: boolean): ArrayListHeader {
     const reader = this.core.reader();
 
     if (size > header.size || size < 0) {
@@ -2093,6 +2093,17 @@ export class Database {
         const slot = Slot.fromBytes(slotBytes);
         shift -= 1;
         indexPos = Number(slot.value);
+      }
+      // the new root may still belong to a past moment. unlike child
+      // nodes, root nodes are written directly, so copy it now.
+      if (!isTopLevel && this.txStart !== null && indexPos < this.txStart) {
+        const indexBlock = new Uint8Array(INDEX_BLOCK_SIZE);
+        this.core.seek(indexPos);
+        reader.readFully(indexBlock);
+        indexPos = this.core.length();
+        const writer = this.core.writer();
+        this.core.seek(indexPos);
+        writer.write(indexBlock);
       }
       return new ArrayListHeader(indexPos, size);
     }
@@ -3147,6 +3158,43 @@ class Compactor {
     }
   }
 
+  private remapArrayListIndex(sourceOffset: number, size: number, shift: number): number {
+    const childSize = 2 ** (shift * BIT_COUNT);
+
+    // full blocks can use the normal cache. partial blocks may
+    // be shared by lists with different sizes, so copy them
+    // separately and leave the slots beyond the size empty.
+    if (size === childSize * SLOT_COUNT) {
+      return Number(this.remapSlot(new Slot(sourceOffset, Tag.INDEX)).value);
+    }
+
+    const targetOffset = this.reserveBlock(INDEX_BLOCK_SIZE);
+    this.sourceCore.seek(sourceOffset);
+    const blockBytes = new Uint8Array(INDEX_BLOCK_SIZE);
+    this.sourceCore.reader().readFully(blockBytes);
+    const remappedBlock = new Uint8Array(INDEX_BLOCK_SIZE);
+    let remaining = size;
+    for (let i = 0; i < SLOT_COUNT && remaining > 0; i++) {
+      const slotBytes = blockBytes.slice(i * Slot.LENGTH, (i + 1) * Slot.LENGTH);
+      const childSlot = Slot.fromBytes(slotBytes);
+      const count = Math.min(remaining, childSize);
+      let remappedSlot: Slot;
+      if (shift === 0) {
+        remappedSlot = this.remapSlot(childSlot);
+      } else {
+        if (childSlot.tag !== Tag.INDEX) throw new UnexpectedTagException();
+        const childOffset = this.remapArrayListIndex(Number(childSlot.value), count, shift - 1);
+        remappedSlot = new Slot(childOffset, childSlot.tag, childSlot.full);
+      }
+      remappedBlock.set(remappedSlot.toBytes(), i * Slot.LENGTH);
+      remaining -= count;
+    }
+
+    this.targetCore.seek(targetOffset);
+    this.targetCore.writer().write(remappedBlock);
+    return targetOffset;
+  }
+
   private populateArrayList(sourceOffset: number, targetOffset: number): void {
     // read ArrayListHeader (16 bytes)
     this.sourceCore.seek(sourceOffset);
@@ -3155,14 +3203,13 @@ class Compactor {
     sourceReader.readFully(headerBytes);
     const header = ArrayListHeader.fromBytes(headerBytes);
 
-    // remap root index block pointer via remapSlot as an .index slot
-    const indexSlot = new Slot(header.ptr, Tag.INDEX);
-    const remappedIndex = this.remapSlot(indexSlot);
+    const shift = header.size <= SLOT_COUNT ? 0 : Math.floor(Math.log(header.size - 1) / Math.log(SLOT_COUNT));
+    const remappedIndex = this.remapArrayListIndex(header.ptr, header.size, shift);
 
     // write new ArrayListHeader with remapped ptr
     this.targetCore.seek(targetOffset);
     const targetWriter = this.targetCore.writer();
-    targetWriter.write(new ArrayListHeader(Number(remappedIndex.value), header.size).toBytes());
+    targetWriter.write(new ArrayListHeader(remappedIndex, header.size).toBytes());
   }
 
   private populateBTree(sourceOffset: number, targetOffset: number): void {
