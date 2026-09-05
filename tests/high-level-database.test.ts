@@ -1602,7 +1602,7 @@ function testIteratorFrom(core: Core, hasher: Hasher): void {
     const linked = new WriteLinkedArrayList(moment.putCursor('linked'));
     for (let i = 0; i < COUNT; i++) linked.append(new Uint(i));
 
-    // the write-side structs expose iteratorFrom too, yielding write cursors
+    // the write-side structs expose iteratorFrom too, yielding read-only cursors
     const checkWrite = (it: WriteCursorIterator, wantFirst: number, wantN: number): void => {
       let first = -1;
       let n = 0;

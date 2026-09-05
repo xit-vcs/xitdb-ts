@@ -16,10 +16,6 @@ export class WriteHashSet extends ReadHashSet {
     return (this.cursor as WriteCursor).iterator();
   }
 
-  override *[Symbol.iterator](): Iterator<WriteCursor> {
-    yield* this.cursor as WriteCursor;
-  }
-
   // put overloads (for sets, put takes only the key)
   put(key: string): void;
   put(key: Bytes): void;

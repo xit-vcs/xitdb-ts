@@ -22,10 +22,6 @@ export class WriteSortedSet extends ReadSortedSet {
     return WriteCursorIterator.from(super.iteratorFromIndex(startIndex));
   }
 
-  override *[Symbol.iterator](): Iterator<WriteCursor> {
-    yield* this.cursor as WriteCursor;
-  }
-
   put(key: string | Bytes | Uint8Array): void {
     (this.cursor as WriteCursor).writePath([new SortedMapGet(new SortedMapGetKey(this.resolveKey(key)))]);
   }

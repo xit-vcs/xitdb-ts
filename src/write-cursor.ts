@@ -72,16 +72,6 @@ export class WriteCursor extends ReadCursor {
     return new Writer(this, 0, new Slot(ptrPos, Tag.BYTES), startPosition, 0);
   }
 
-  override *[Symbol.iterator](): Iterator<WriteCursor> {
-    const iterator = this.iterator();
-    while (iterator.hasNext()) {
-      const next = iterator.next();
-      if (next !== null) {
-        yield next;
-      }
-    }
-  }
-
   override iterator(): WriteCursorIterator {
     const iterator = new WriteCursorIterator(this);
     iterator.init();
@@ -151,27 +141,20 @@ export class Writer {
   }
 }
 
+// iterators don't copy shared nodes, so their cursors must
+// be read-only. this also prevents changes to sorted keys.
 export class WriteCursorIterator extends CursorIterator {
   constructor(cursor: WriteCursor) {
     super(cursor);
   }
 
-  // wrap an already-seeked read iterator so it yields write cursors. backs the
-  // write-side iteratorFrom/iteratorFromIndex methods.
+  // wrap an already-seeked read iterator for the write-side
+  // iteratorFrom/iteratorFromIndex methods.
   static from(inner: CursorIterator): WriteCursorIterator {
     const it = new WriteCursorIterator(inner.cursor as WriteCursor);
     it.size = inner.size;
     it.index = inner.index;
     it.stack = inner.stack;
     return it;
-  }
-
-  override next(): WriteCursor | null {
-    const readCursor = super.next();
-    if (readCursor !== null) {
-      return new WriteCursor(readCursor.slotPtr, readCursor.db);
-    } else {
-      return null;
-    }
   }
 }

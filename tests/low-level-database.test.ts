@@ -1179,7 +1179,7 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         const kvPairCursor = iter.next();
         const kvPair = kvPairCursor!.readKeyValuePair();
         if (arraysEqual(kvPair.hash, fooKey)) {
-          kvPair.keyCursor.write(new Bytes('bar'));
+          assert.strictEqual(kvPair.valueCursor.readUint(), 42);
         }
         i += 1;
       }

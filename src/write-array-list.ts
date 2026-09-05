@@ -25,10 +25,6 @@ export class WriteArrayList extends ReadArrayList {
     return WriteCursorIterator.from(super.iteratorFrom(index));
   }
 
-  override *[Symbol.iterator](): Iterator<WriteCursor> {
-    yield* this.cursor as WriteCursor;
-  }
-
   put(index: number, data: WriteableData): void {
     (this.cursor as WriteCursor).writePath([
       new ArrayListGet(index),

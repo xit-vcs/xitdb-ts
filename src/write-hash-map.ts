@@ -23,10 +23,6 @@ export class WriteHashMap extends ReadHashMap {
     return (this.cursor as WriteCursor).iterator();
   }
 
-  override *[Symbol.iterator](): Iterator<WriteCursor> {
-    yield* this.cursor as WriteCursor;
-  }
-
   // put overloads
   put(key: string, data: WriteableData): void;
   put(key: Bytes, data: WriteableData): void;

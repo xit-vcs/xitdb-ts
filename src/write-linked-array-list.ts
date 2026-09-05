@@ -27,10 +27,6 @@ export class WriteLinkedArrayList extends ReadLinkedArrayList {
     return WriteCursorIterator.from(super.iteratorFrom(index));
   }
 
-  override *[Symbol.iterator](): Iterator<WriteCursor> {
-    yield* this.cursor as WriteCursor;
-  }
-
   put(index: number, data: WriteableData): void {
     (this.cursor as WriteCursor).writePath([
       new LinkedArrayListGet(index),
