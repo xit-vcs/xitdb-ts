@@ -36,7 +36,19 @@ export class WriteCursor extends ReadCursor {
   }
 
   writePath(path: PathPart[]): WriteCursor {
-    const slotPtr = this.db.readSlotPointer(WriteMode.READ_WRITE, path, 0, this.slotPtr);
+    let slotPtr: SlotPointer;
+    try {
+      slotPtr = this.db.readSlotPointer(WriteMode.READ_WRITE, path, 0, this.slotPtr);
+    } catch (e) {
+      // only truncate when the error escapes the outer write.
+      // a nested callback's caller may still commit its work.
+      if (this.db.txStart === null) {
+        try {
+          this.db.truncate();
+        } catch (_) {}
+      }
+      throw e;
+    }
     if (this.db.txStart === null) {
       this.db.core.sync();
     }

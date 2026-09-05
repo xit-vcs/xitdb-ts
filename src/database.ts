@@ -1475,14 +1475,7 @@ export class Context implements PathPartBase {
     if (pathI !== path.length - 1) throw new PathPartMustBeAtEndException();
 
     const nextCursor = new WriteCursor(slotPtr, db);
-    try {
-      this.fn(nextCursor);
-    } catch (e) {
-      try {
-        db.truncate();
-      } catch (_) {}
-      throw e;
-    }
+    this.fn(nextCursor);
     return nextCursor.slotPtr;
   }
 }
