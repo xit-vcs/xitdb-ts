@@ -709,18 +709,20 @@ function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null): 
     assert.strictEqual(new TextDecoder().decode(todoValue), 'Pay the bills');
   }
 
-  // The db size remains the same after writing junk data and then reinitializing the db
+  // opening the db leaves trailing data alone, because it may
+  // belong to another writer's unfinished transaction.
   {
     core.seek(core.length());
-    const sizeBefore = core.length();
 
     const writer = core.writer();
-    writer.write(new TextEncoder().encode('this is junk data that will be deleted during init'));
+    writer.write(new TextEncoder().encode('this is trailing data from an unfinished transaction'));
+    core.flush();
+    const sizeWithTail = core.length();
 
     db = new Database(core, hasher);
 
     const sizeAfter = core.length();
-    assert.strictEqual(sizeBefore, sizeAfter);
+    assert.strictEqual(sizeWithTail, sizeAfter);
   }
 
   // Cloning

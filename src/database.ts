@@ -1545,7 +1545,7 @@ export class Database {
       if (this.header.hashSize !== hasher.digestLength) {
         throw new InvalidHashSizeException();
       }
-      this.truncate();
+      this.validateCommittedSize();
     }
   }
 
@@ -1635,8 +1635,8 @@ export class Database {
     return target;
   }
 
-  truncate(): void {
-    if (this.header.tag !== Tag.ARRAY_LIST) return;
+  private validateCommittedSize(): number {
+    if (this.header.tag !== Tag.ARRAY_LIST) return this.core.length();
 
     this.core.seek(Header.LENGTH);
     const reader = this.core.reader();
@@ -1658,11 +1658,14 @@ export class Database {
     const fileSize = this.core.length();
 
     if (fileSize < committedSize) throw new TruncatedDatabaseException();
-    if (fileSize === committedSize) return;
+    return committedSize;
+  }
 
-    try {
+  truncate(): void {
+    const committedSize = this.validateCommittedSize();
+    if (this.core.length() > committedSize) {
       this.core.setLength(committedSize);
-    } catch (_) {}
+    }
   }
 
   checkHashBytes(hash: Uint8Array): Uint8Array {

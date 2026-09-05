@@ -115,10 +115,19 @@ export class Writer {
 
   write(buffer: Uint8Array): void {
     if (this.size < this.relativePosition) throw new EndOfStreamException();
+    const newPosition = this.relativePosition + buffer.length;
+
+    // another allocation may now follow this byte array.
+    // extending it would overwrite that allocation.
+    if (newPosition > this.size) {
+      const end = this.parent.db.core.length();
+      if (end !== this.startPosition + this.size) throw new UnexpectedWriterPositionException();
+    }
+
     this.parent.db.core.seek(this.startPosition + this.relativePosition);
     const writer = this.parent.db.core.writer();
     writer.write(buffer);
-    this.relativePosition += buffer.length;
+    this.relativePosition = newPosition;
     if (this.relativePosition > this.size) {
       this.size = this.relativePosition;
     }
