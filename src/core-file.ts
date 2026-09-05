@@ -1,4 +1,5 @@
 import type { Core, DataReader, DataWriter } from './core.js';
+import { EndOfStreamException } from './exceptions.js';
 import * as fs from 'fs';
 
 export class CoreFile implements Core {
@@ -64,7 +65,12 @@ class FileDataReader implements DataReader {
 
   readFully(b: Uint8Array): void {
     const position = this.core.position();
-    fs.readSync(this.core.fd, b, 0, b.length, position);
+    let offset = 0;
+    while (offset < b.length) {
+      const size = fs.readSync(this.core.fd, b, offset, b.length - offset, position + offset);
+      if (size === 0) throw new EndOfStreamException();
+      offset += size;
+    }
     this.core.seek(position + b.length);
   }
 
