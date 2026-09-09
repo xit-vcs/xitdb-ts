@@ -3,6 +3,8 @@ import { Slot } from './slot.js';
 import { SlotPointer } from './slot-pointer.js';
 import {
   Database,
+  Transaction,
+  ArrayListInit,
   WriteMode,
   WriteData,
   type PathPart,
@@ -31,28 +33,49 @@ export class WriteKeyValuePairCursor extends KeyValuePairCursor {
 }
 
 export class WriteCursor extends ReadCursor {
-  constructor(slotPtr: SlotPointer, db: Database) {
+  private readonly transaction: Transaction | null;
+
+  constructor(slotPtr: SlotPointer, db: Database, transaction: Transaction | null = db.transaction) {
     super(slotPtr, db);
+    this.transaction = slotPtr.position === null ? null : transaction;
+  }
+
+  checkWrite(): void {
+    const active = this.db.transaction;
+    if (this.transaction !== null && this.transaction !== active) {
+      throw new Error('Writer belongs to an expired transaction');
+    }
+    if (this.slotPtr.position !== null && this.db.header.tag === Tag.ARRAY_LIST && this.transaction === null) {
+      throw new Error('Writer was created outside a transaction');
+    }
   }
 
   writePath(path: PathPart[]): WriteCursor {
-    let slotPtr: SlotPointer;
+    this.checkWrite();
+    const startsTransaction = this.db.transaction === null && this.slotPtr.position === null
+      && (this.db.header.tag === Tag.ARRAY_LIST || (path.length > 0 && path[0] instanceof ArrayListInit));
+    if (startsTransaction) this.db.transaction = new Transaction();
     try {
-      slotPtr = this.db.readSlotPointer(WriteMode.READ_WRITE, path, 0, this.slotPtr);
-    } catch (e) {
-      // only truncate when the error escapes the outer write.
-      // a nested callback's caller may still commit its work.
-      if (this.db.txStart === null) {
-        try {
-          this.db.truncate();
-        } catch (_) {}
+      let slotPtr: SlotPointer;
+      try {
+        slotPtr = this.db.readSlotPointer(WriteMode.READ_WRITE, path, 0, this.slotPtr);
+      } catch (e) {
+        // only truncate when the error escapes the outer write.
+        // a nested callback's caller may still commit its work.
+        if (this.db.txStart === null) {
+          try {
+            this.db.truncate();
+          } catch (_) {}
+        }
+        throw e;
       }
-      throw e;
+      if (this.db.txStart === null) {
+        this.db.core.sync();
+      }
+      return new WriteCursor(slotPtr, this.db);
+    } finally {
+      if (startsTransaction) this.db.transaction = null;
     }
-    if (this.db.txStart === null) {
-      this.db.core.sync();
-    }
-    return new WriteCursor(slotPtr, this.db);
   }
 
   write(data: WriteableData | null): void {
@@ -61,6 +84,7 @@ export class WriteCursor extends ReadCursor {
   }
 
   writeIfEmpty(data: WriteableData): void {
+    this.checkWrite();
     if (this.slotPtr.slot.empty()) {
       this.write(data);
     }
@@ -69,13 +93,14 @@ export class WriteCursor extends ReadCursor {
   override readKeyValuePair(): WriteKeyValuePairCursor {
     const kvPairCursor = super.readKeyValuePair();
     return new WriteKeyValuePairCursor(
-      new WriteCursor(kvPairCursor.valueCursor.slotPtr, this.db),
-      new WriteCursor(kvPairCursor.keyCursor.slotPtr, this.db),
+      new WriteCursor(kvPairCursor.valueCursor.slotPtr, this.db, this.transaction),
+      new WriteCursor(kvPairCursor.keyCursor.slotPtr, this.db, this.transaction),
       kvPairCursor.hash
     );
   }
 
   writer(): Writer {
+    this.checkWrite();
     const writer = this.db.core.writer();
     const ptrPos = this.db.core.length();
     this.db.core.seek(ptrPos);
@@ -114,6 +139,7 @@ export class Writer {
   }
 
   write(buffer: Uint8Array): void {
+    this.parent.checkWrite();
     if (this.size < this.relativePosition) throw new EndOfStreamException();
     const newPosition = this.relativePosition + buffer.length;
 
@@ -134,6 +160,7 @@ export class Writer {
   }
 
   finish(): void {
+    this.parent.checkWrite();
     const writer = this.parent.db.core.writer();
 
     if (this.formatTag !== null) {

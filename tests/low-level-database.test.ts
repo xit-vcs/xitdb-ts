@@ -2,6 +2,10 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   Database,
+  WriteArrayList,
+  WriteHashMap,
+  ReadHashMap,
+  Writer,
   Tag,
   Hasher,
   Core,
@@ -46,6 +50,39 @@ import { mkdtempSync, readFileSync, rmSync } from 'fs';
 const MAX_READ_BYTES = 1024;
 
 describe('Low Level API', () => {
+  test('expired writers', () => {
+    const db = new Database(new CoreMemory(), new Hasher('SHA-1'));
+    const history = new WriteArrayList(db.rootCursor());
+    let escaped: WriteHashMap;
+    let bytes: Writer;
+    const reject = () => {
+      assert.throws(() => escaped.put('v', new Int(999)), /Writer belongs to an expired transaction/);
+      assert.throws(() => bytes.write(new Uint8Array([1])), /Writer belongs to an expired transaction/);
+      assert.throws(() => bytes.finish(), /Writer belongs to an expired transaction/);
+    };
+    history.appendContext(null, cursor => {
+      escaped = new WriteHashMap(cursor);
+      escaped.put('v', new Int(1));
+      bytes = escaped.putCursor('bytes').writer();
+      bytes.write(new Uint8Array(16));
+      bytes.finish();
+    });
+    reject();
+    history.appendContext(history.getSlot(0), cursor => {
+      reject();
+      new WriteHashMap(cursor).put('v', new Int(2));
+    });
+    assert.strictEqual(new ReadHashMap(history.getCursor(0)!).getCursor('v')!.readInt(), 1);
+    assert.strictEqual(new ReadHashMap(history.getCursor(1)!).getCursor('v')!.readInt(), 2);
+    assert.throws(() => history.appendContext(null, cursor => {
+      escaped = new WriteHashMap(cursor);
+      throw new Error('rollback');
+    }), /rollback/);
+    reject();
+    history.appendContext(history.getSlot(1), cursor => reject());
+    assert.strictEqual(new ReadHashMap(history.getCursor(2)!).getCursor('v')!.readInt(), 2);
+  });
+
   test('in-memory storage', () => {
     using core = new CoreMemory();
     const hasher = new Hasher('SHA-1');
@@ -304,8 +341,8 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         new WriteData(rootCursor.readPathSlot([new ArrayListGet(-1)])),
         new HashMapInit(false, false),
         new HashMapGet(new HashMapGetValue(barKey)),
+        new WriteData(new Bytes('longstring')),
       ]);
-      barCursor.write(new Bytes('longstring'));
 
       // the slot tag is BYTES because the byte array is > 8 bytes long
       assert.strictEqual(barCursor.slot().tag, Tag.BYTES);
@@ -318,8 +355,8 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
           new WriteData(rootCursor.readPathSlot([new ArrayListGet(-1)])),
           new HashMapInit(false, false),
           new HashMapGet(new HashMapGetValue(barKey)),
+          new Context(cursor => cursor.writeIfEmpty(new Bytes('longstring'))),
         ]);
-        nextBarCursor.writeIfEmpty(new Bytes('longstring'));
         assert.strictEqual(barCursor.slot().value, nextBarCursor.slot().value);
       }
 
@@ -331,8 +368,8 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
           new WriteData(rootCursor.readPathSlot([new ArrayListGet(-1)])),
           new HashMapInit(false, false),
           new HashMapGet(new HashMapGetValue(barKey)),
+          new WriteData(new Bytes('longstring')),
         ]);
-        nextBarCursor.write(new Bytes('longstring'));
         assert.notStrictEqual(barCursor.slot().value, nextBarCursor.slot().value);
       }
     }
@@ -355,8 +392,8 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         new WriteData(rootCursor.readPathSlot([new ArrayListGet(-1)])),
         new HashMapInit(false, false),
         new HashMapGet(new HashMapGetValue(barKey)),
+        new WriteData(new Bytes('shortstr')),
       ]);
-      barCursor.write(new Bytes('shortstr'));
 
       // the slot tag is SHORT_BYTES because the byte array is <= 8 bytes long
       assert.strictEqual(barCursor.slot().tag, Tag.SHORT_BYTES);
@@ -377,8 +414,8 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         new WriteData(rootCursor.readPathSlot([new ArrayListGet(-1)])),
         new HashMapInit(false, false),
         new HashMapGet(new HashMapGetValue(barKey)),
+        new WriteData(new Bytes('shortstr', new TextEncoder().encode('st'))),
       ]);
-      barCursor.write(new Bytes('shortstr', new TextEncoder().encode('st')));
 
       // the slot tag is BYTES because the byte array is > 8 bytes long including the format tag
       assert.strictEqual(barCursor.slot().tag, Tag.BYTES);
@@ -408,8 +445,8 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         new WriteData(rootCursor.readPathSlot([new ArrayListGet(-1)])),
         new HashMapInit(false, false),
         new HashMapGet(new HashMapGetValue(barKey)),
+        new WriteData(new Bytes('shorts', new TextEncoder().encode('st'))),
       ]);
-      barCursor.write(new Bytes('shorts', new TextEncoder().encode('st')));
 
       // the slot tag is SHORT_BYTES because the byte array is <= 8 bytes long including the format tag
       assert.strictEqual(barCursor.slot().tag, Tag.SHORT_BYTES);
@@ -439,8 +476,8 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
         new WriteData(rootCursor.readPathSlot([new ArrayListGet(-1)])),
         new HashMapInit(false, false),
         new HashMapGet(new HashMapGetValue(barKey)),
+        new WriteData(new Bytes('short', new TextEncoder().encode('st'))),
       ]);
-      barCursor.write(new Bytes('short', new TextEncoder().encode('st')));
 
       // the slot tag is SHORT_BYTES because the byte array is <= 8 bytes long including the format tag
       assert.strictEqual(barCursor.slot().tag, Tag.SHORT_BYTES);

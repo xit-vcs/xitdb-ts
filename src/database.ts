@@ -1523,12 +1523,15 @@ function bigIntShiftRight(value: Uint8Array, bits: number): bigint {
   return result >> BigInt(bits);
 }
 
+export class Transaction {}
+
 // Database class
 export class Database {
   public core: Core;
   public hasher: Hasher;
   public header!: Header;
   public txStart: number | null = null;
+  public transaction: Transaction | null = null;
 
   constructor(core: Core, hasher: Hasher) {
     this.core = core;
