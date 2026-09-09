@@ -1723,7 +1723,6 @@ export class Database {
     }
 
     const reader = this.core.reader();
-    const writer = this.core.writer();
 
     const i = Number(bigIntShiftRight(keyHash, keyOffset * BIT_COUNT) & MASK);
     const slotPos = indexPos + Slot.LENGTH * i;
@@ -1740,6 +1739,7 @@ export class Database {
           case WriteMode.READ_ONLY:
             throw new KeyNotFoundException();
           case WriteMode.READ_WRITE: {
+            const writer = this.core.writer();
             const hashPos = this.core.length();
             this.core.seek(hashPos);
             const keySlotPos = hashPos + this.header.hashSize;
@@ -1770,6 +1770,7 @@ export class Database {
         if (writeMode === WriteMode.READ_WRITE && !isTopLevel) {
           if (this.txStart !== null) {
             if (nextPtr < this.txStart) {
+              const writer = this.core.writer();
               this.core.seek(ptr);
               const indexBlock = new Uint8Array(INDEX_BLOCK_SIZE);
               reader.readFully(indexBlock);
@@ -1797,6 +1798,7 @@ export class Database {
           if (writeMode === WriteMode.READ_WRITE && !isTopLevel) {
             if (this.txStart !== null) {
               if (ptr < this.txStart) {
+                const writer = this.core.writer();
                 const hashPos = this.core.length();
                 this.core.seek(hashPos);
                 const keySlotPos = hashPos + this.header.hashSize;
@@ -1838,6 +1840,7 @@ export class Database {
             case WriteMode.READ_ONLY:
               throw new KeyNotFoundException();
             case WriteMode.READ_WRITE: {
+              const writer = this.core.writer();
               if (keyOffset + 1 >= (this.header.hashSize * 8) / BIT_COUNT) {
                 throw new KeyOffsetExceededException();
               }
