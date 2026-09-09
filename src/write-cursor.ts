@@ -64,6 +64,10 @@ export class WriteCursor extends ReadCursor {
 
   writePath(path: PathPart[]): WriteCursor {
     this.checkWritable();
+    // nested top-level writes could commit before the outer transaction ends
+    if (this.db.transaction !== null && this.slotPtr.position === null && path.length > 0) {
+      throw new Error('Nested top-level writes are not allowed');
+    }
     const startsTransaction = this.db.transaction === null && this.slotPtr.position === null
       && (this.db.header.tag === Tag.ARRAY_LIST || (path.length > 0 && path[0] instanceof ArrayListInit));
     if (startsTransaction) this.db.transaction = new Transaction();

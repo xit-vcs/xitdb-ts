@@ -99,6 +99,10 @@ describe('Low Level API', () => {
   test('expired writers', () => {
     const db = new Database(new CoreMemory(), new Hasher('SHA-1'));
     const history = new WriteArrayList(db.rootCursor());
+    assert.throws(() => db.rootCursor().writePath([
+      new Context(cursor => history.append(new Int(999))),
+    ]), /Nested top-level writes are not allowed/);
+    assert.strictEqual(history.count(), 0);
     let escaped: WriteHashMap;
     let bytes: Writer;
     const reject = () => {
@@ -112,6 +116,8 @@ describe('Low Level API', () => {
       bytes = escaped.putCursor('bytes').writer();
       bytes.write(new Uint8Array(16));
       bytes.finish();
+      assert.throws(() => history.append(new Int(999)), /Nested top-level writes are not allowed/);
+      assert.throws(() => history.slice(0), /Nested top-level writes are not allowed/);
     });
     reject();
     history.appendContext(history.getSlot(0), cursor => {
