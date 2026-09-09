@@ -80,11 +80,12 @@ describe('Low Level API', () => {
     ]);
     assert.strictEqual(new ReadHashMap(result).getCursor('v')!.readInt(), 3);
     assert.deepStrictEqual(history.getSlot(0), result.slot());
-    history.appendContext(null, cursor => {
+    let frozen!: ReadCursor;
+    assert.throws(() => history.appendContext(null, cursor => {
       const writer = cursor.writer();
       writer.write(new Uint8Array(16));
       writer.finish();
-      const frozen = new ReadCursor(cursor.slotPtr, db);
+      frozen = new ReadCursor(cursor.slotPtr, db);
       db.freeze();
       writer.seek(0);
       assert.throws(() => writer.write(new Uint8Array([99])), /Byte writer points into frozen data/);
@@ -93,7 +94,17 @@ describe('Low Level API', () => {
       next.write(new Uint8Array(16));
       next.finish();
       assert.deepStrictEqual(frozen.readBytes(MAX_READ_BYTES), new Uint8Array(16));
-    });
+      throw new Error('rollback');
+    }), /rollback/);
+    assert.deepStrictEqual(frozen.readBytes(MAX_READ_BYTES), new Uint8Array(16));
+    assert.strictEqual(history.appendCursor().slot().tag, Tag.NONE);
+    assert.strictEqual(history.getSlot(-1), null);
+    assert.throws(() => history.appendContext(new Bytes(new Uint8Array(16)), cursor => {
+      assert.fail('rollback');
+    }), assert.AssertionError);
+    history.append(new Bytes('abcdefghijklmnop'));
+    assert.strictEqual(history.count(), 3);
+    assert.deepStrictEqual(frozen.readBytes(MAX_READ_BYTES), new Uint8Array(16));
   });
 
   test('expired writers', () => {

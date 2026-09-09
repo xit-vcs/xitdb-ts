@@ -1682,7 +1682,16 @@ export class Database {
   }
 
   truncate(): void {
-    const committedSize = this.validateCommittedSize();
+    let committedSize = this.validateCommittedSize();
+    const active = this.transaction;
+    if (active !== null && active.frozenAt !== null && active.frozenAt > committedSize) {
+      // retain frozen bytes without publishing the failed transaction
+      this.core.sync();
+      this.core.seek(Header.LENGTH + ArrayListHeader.LENGTH);
+      this.core.writer().writeLong(active.frozenAt);
+      this.core.sync();
+      committedSize = active.frozenAt;
+    }
     if (this.core.length() > committedSize) {
       this.core.setLength(committedSize);
     }
@@ -2028,7 +2037,12 @@ export class Database {
       indexPos = nextIndexPos;
     }
 
-    const slotPtr = this.readArrayListSlot(indexPos, key, nextShift, writeMode, isTopLevel);
+    let slotPtr = this.readArrayListSlot(indexPos, key, nextShift, writeMode, isTopLevel);
+    // clear values left by a rollback or slice
+    slotPtr = slotPtr.withSlot(new Slot());
+    if (slotPtr.position === null) throw new CursorNotWriteableException();
+    this.core.seek(slotPtr.position);
+    writer.write(slotPtr.slot.toBytes());
     return new ArrayListAppendResult(new ArrayListHeader(indexPos, header.size + 1), slotPtr);
   }
 
