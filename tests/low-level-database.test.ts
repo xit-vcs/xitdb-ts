@@ -5,6 +5,8 @@ import {
   WriteArrayList,
   WriteHashMap,
   ReadHashMap,
+  ReadCursor,
+  WriteCursor,
   Writer,
   Tag,
   Hasher,
@@ -50,6 +52,50 @@ import { mkdtempSync, readFileSync, rmSync } from 'fs';
 const MAX_READ_BYTES = 1024;
 
 describe('Low Level API', () => {
+  test('frozen writers', () => {
+    const db = new Database(new CoreMemory(), new Hasher('SHA-1'));
+    const history = new WriteArrayList(db.rootCursor());
+    const result = db.rootCursor().writePath([
+      new ArrayListAppend(),
+      new HashMapInit(),
+      new Context(cursor => {
+        const map = new WriteHashMap(cursor);
+        map.put('v', new Int(1));
+        const child = new WriteHashMap(map.putCursor('child'));
+        child.put('v', new Int(2));
+        const equivalent = (map.cursor as WriteCursor).writePath([]);
+        const frozen = new ReadHashMap(new ReadCursor(map.cursor.slotPtr, db));
+        db.freeze();
+        assert.throws(() => child.put('v', new Int(999)), /Writer points into frozen data/);
+        equivalent.writePath([
+          new HashMapGet(new HashMapGetValue(db.hasher.digest(new TextEncoder().encode('v')))),
+          new WriteData(new Int(999)),
+        ]);
+        map.put('v', new Int(3));
+        new WriteHashMap(map.putCursor('child')).put('v', new Int(4));
+        assert.strictEqual(frozen.getCursor('v')!.readInt(), 1);
+        assert.strictEqual(new ReadHashMap(frozen.getCursor('child')!).getCursor('v')!.readInt(), 2);
+        assert.strictEqual(map.getCursor('v')!.readInt(), 3);
+      }),
+    ]);
+    assert.strictEqual(new ReadHashMap(result).getCursor('v')!.readInt(), 3);
+    assert.deepStrictEqual(history.getSlot(0), result.slot());
+    history.appendContext(null, cursor => {
+      const writer = cursor.writer();
+      writer.write(new Uint8Array(16));
+      writer.finish();
+      const frozen = new ReadCursor(cursor.slotPtr, db);
+      db.freeze();
+      writer.seek(0);
+      assert.throws(() => writer.write(new Uint8Array([99])), /Byte writer points into frozen data/);
+      assert.throws(() => writer.finish(), /Byte writer points into frozen data/);
+      const next = cursor.writer();
+      next.write(new Uint8Array(16));
+      next.finish();
+      assert.deepStrictEqual(frozen.readBytes(MAX_READ_BYTES), new Uint8Array(16));
+    });
+  });
+
   test('expired writers', () => {
     const db = new Database(new CoreMemory(), new Hasher('SHA-1'));
     const history = new WriteArrayList(db.rootCursor());

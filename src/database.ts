@@ -516,6 +516,7 @@ export class ArrayListGet implements PathPartBase {
         throw new UnexpectedTagException();
     }
 
+    if (writeMode === WriteMode.READ_WRITE) slotPtr = db.copyCollectionIfFrozen(slotPtr, isTopLevel, new ArrayListInit());
     const nextArrayListStart = Number(slotPtr.slot.value);
     let index = this.index;
 
@@ -554,6 +555,7 @@ export class ArrayListAppend implements PathPartBase {
     if (tag !== Tag.ARRAY_LIST) throw new UnexpectedTagException();
 
     const reader = db.core.reader();
+    slotPtr = db.copyCollectionIfFrozen(slotPtr, isTopLevel, new ArrayListInit());
     const nextArrayListStart = Number(slotPtr.slot.value);
 
     db.core.seek(nextArrayListStart);
@@ -562,9 +564,17 @@ export class ArrayListAppend implements PathPartBase {
     const origHeader = ArrayListHeader.fromBytes(headerBytes);
 
     const appendResult = db.readArrayListSlotAppend(origHeader, writeMode, isTopLevel);
+    const writer = db.core.writer();
+    // update nested headers before callbacks can freeze them
+    if (!isTopLevel) {
+      db.core.seek(nextArrayListStart);
+      writer.write(appendResult.header.toBytes());
+    }
+    if (isTopLevel && db.transaction !== null) {
+      db.transaction.rootPosition = appendResult.slotPtr.position;
+    }
     const finalSlotPtr = db.readSlotPointer(writeMode, path, pathI + 1, appendResult.slotPtr);
 
-    const writer = db.core.writer();
     if (isTopLevel) {
       // flush and fsync before updating the header, because updating the
       // header is what completes the transaction. without the fsync, the OS
@@ -576,9 +586,6 @@ export class ArrayListAppend implements PathPartBase {
       const header = new TopLevelArrayListHeader(fileSize, appendResult.header);
       db.core.seek(nextArrayListStart);
       writer.write(header.toBytes());
-    } else {
-      db.core.seek(nextArrayListStart);
-      writer.write(appendResult.header.toBytes());
     }
 
     return finalSlotPtr;
@@ -601,6 +608,7 @@ export class ArrayListSlice implements PathPartBase {
     if (slotPtr.slot.tag !== Tag.ARRAY_LIST) throw new UnexpectedTagException();
 
     const reader = db.core.reader();
+    slotPtr = db.copyCollectionIfFrozen(slotPtr, isTopLevel, new ArrayListInit());
     const nextArrayListStart = Number(slotPtr.slot.value);
 
     db.core.seek(nextArrayListStart);
@@ -609,17 +617,20 @@ export class ArrayListSlice implements PathPartBase {
     const origHeader = ArrayListHeader.fromBytes(headerBytes);
 
     const sliceHeader = db.readArrayListSlice(origHeader, this.size, isTopLevel);
+    const writer = db.core.writer();
+    // update nested headers before callbacks can freeze them
+    if (!isTopLevel) {
+      db.core.seek(nextArrayListStart);
+      writer.write(sliceHeader.toBytes());
+    }
     const finalSlotPtr = db.readSlotPointer(writeMode, path, pathI + 1, slotPtr);
 
-    // if top level, updating the header below commits the transaction,
-    // so make everything written so far durable first
+    // commit the top-level header after the callback's writes are durable
     if (isTopLevel) {
       db.core.sync();
+      db.core.seek(nextArrayListStart);
+      writer.write(sliceHeader.toBytes());
     }
-
-    const writer = db.core.writer();
-    db.core.seek(nextArrayListStart);
-    writer.write(sliceHeader.toBytes());
 
     return finalSlotPtr;
   }
@@ -708,6 +719,7 @@ export class LinkedArrayListGet implements PathPartBase {
 
     const index = this.index;
 
+    if (writeMode === WriteMode.READ_WRITE) slotPtr = db.copyCollectionIfFrozen(slotPtr, isTopLevel, new LinkedArrayListInit());
     const headerPtr = Number(slotPtr.slot.value);
     const reader = db.core.reader();
     db.core.seek(headerPtr);
@@ -725,20 +737,13 @@ export class LinkedArrayListGet implements PathPartBase {
     } else {
       // path-copy down to the value slot so the write is persistent
       const writeSlot = db.btreeGetForWrite(header.rootPtr, rank);
-      const finalSlotPtr = db.readSlotPointer(
-        writeMode,
-        path,
-        pathI + 1,
-        new SlotPointer(writeSlot.valuePosition, writeSlot.slot)
-      );
-      // the header only needs rewriting if the root actually moved (it stays put
-      // when the whole path was already this-transaction)
+      // update the header before callbacks can freeze it
       if (writeSlot.nodePtr !== header.rootPtr) {
         const writer = db.core.writer();
         db.core.seek(headerPtr);
         writer.write(new BTreeHeader(writeSlot.nodePtr, header.size).toBytes());
       }
-      return finalSlotPtr;
+      return db.readSlotPointer(writeMode, path, pathI + 1, new SlotPointer(writeSlot.valuePosition, writeSlot.slot));
     }
   }
 }
@@ -757,6 +762,7 @@ export class LinkedArrayListAppend implements PathPartBase {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
     if (slotPtr.slot.tag !== Tag.LINKED_ARRAY_LIST) throw new UnexpectedTagException();
 
+    slotPtr = db.copyCollectionIfFrozen(slotPtr, isTopLevel, new LinkedArrayListInit());
     const headerPtr = Number(slotPtr.slot.value);
     const reader = db.core.reader();
     db.core.seek(headerPtr);
@@ -798,6 +804,7 @@ export class LinkedArrayListSlice implements PathPartBase {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
     if (slotPtr.slot.tag !== Tag.LINKED_ARRAY_LIST) throw new UnexpectedTagException();
 
+    slotPtr = db.copyCollectionIfFrozen(slotPtr, isTopLevel, new LinkedArrayListInit());
     const headerPtr = Number(slotPtr.slot.value);
     const reader = db.core.reader();
     db.core.seek(headerPtr);
@@ -841,6 +848,7 @@ export class LinkedArrayListConcat implements PathPartBase {
     if (slotPtr.slot.tag !== Tag.LINKED_ARRAY_LIST) throw new UnexpectedTagException();
     if (this.list.tag !== Tag.LINKED_ARRAY_LIST) throw new UnexpectedTagException();
 
+    slotPtr = db.copyCollectionIfFrozen(slotPtr, isTopLevel, new LinkedArrayListInit());
     const headerPtr = Number(slotPtr.slot.value);
     const reader = db.core.reader();
     db.core.seek(headerPtr);
@@ -884,6 +892,7 @@ export class LinkedArrayListInsert implements PathPartBase {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
     if (slotPtr.slot.tag !== Tag.LINKED_ARRAY_LIST) throw new UnexpectedTagException();
 
+    slotPtr = db.copyCollectionIfFrozen(slotPtr, isTopLevel, new LinkedArrayListInit());
     const headerPtr = Number(slotPtr.slot.value);
     const reader = db.core.reader();
     db.core.seek(headerPtr);
@@ -930,6 +939,7 @@ export class LinkedArrayListRemove implements PathPartBase {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
     if (slotPtr.slot.tag !== Tag.LINKED_ARRAY_LIST) throw new UnexpectedTagException();
 
+    slotPtr = db.copyCollectionIfFrozen(slotPtr, isTopLevel, new LinkedArrayListInit());
     const headerPtr = Number(slotPtr.slot.value);
     const reader = db.core.reader();
     db.core.seek(headerPtr);
@@ -1116,6 +1126,7 @@ export class HashMapGet implements PathPartBase {
         throw new UnexpectedTagException();
     }
 
+    if (writeMode === WriteMode.READ_WRITE) slotPtr = db.copyCollectionIfFrozen(slotPtr, isTopLevel, new HashMapInit(counted, slotPtr.slot.tag === Tag.HASH_SET || slotPtr.slot.tag === Tag.COUNTED_HASH_SET));
     const indexPos = counted ? Number(slotPtr.slot.value) + 8 : Number(slotPtr.slot.value);
     const hash = db.checkHash(this.target);
     const res = db.readMapSlot(indexPos, hash, 0, writeMode, isTopLevel, this.target);
@@ -1162,6 +1173,7 @@ export class HashMapRemove implements PathPartBase {
         throw new UnexpectedTagException();
     }
 
+    slotPtr = db.copyCollectionIfFrozen(slotPtr, isTopLevel, new HashMapInit(counted, slotPtr.slot.tag === Tag.HASH_SET || slotPtr.slot.tag === Tag.COUNTED_HASH_SET));
     const indexPos = counted ? Number(slotPtr.slot.value) + 8 : Number(slotPtr.slot.value);
     const hash = db.checkHashBytes(this.hash);
 
@@ -1273,6 +1285,7 @@ export class SortedMapGet implements PathPartBase {
 
     const key = this.target.key;
 
+    if (writeMode === WriteMode.READ_WRITE) slotPtr = db.copyCollectionIfFrozen(slotPtr, isTopLevel, new SortedMapInit(slotPtr.slot.tag === Tag.SORTED_SET));
     const headerPtr = Number(slotPtr.slot.value);
     const reader = db.core.reader();
     db.core.seek(headerPtr);
@@ -1371,6 +1384,7 @@ export class SortedMapRemove implements PathPartBase {
         throw new UnexpectedTagException();
     }
 
+    slotPtr = db.copyCollectionIfFrozen(slotPtr, isTopLevel, new SortedMapInit(slotPtr.slot.tag === Tag.SORTED_SET));
     const headerPtr = Number(slotPtr.slot.value);
     const reader = db.core.reader();
     db.core.seek(headerPtr);
@@ -1523,7 +1537,10 @@ function bigIntShiftRight(value: Uint8Array, bits: number): bigint {
   return result >> BigInt(bits);
 }
 
-export class Transaction {}
+export class Transaction {
+  rootPosition: number | null = null;
+  frozenAt: number | null = null;
+}
 
 // Database class
 export class Database {
@@ -1566,11 +1583,11 @@ export class Database {
   }
 
   freeze(): void {
-    if (this.txStart !== null) {
-      this.txStart = this.core.length();
-    } else {
-      throw new ExpectedTxStartException();
-    }
+    const active = this.transaction;
+    if (active === null) throw new ExpectedTxStartException();
+    if (this.txStart === null) throw new ExpectedTxStartException();
+    this.txStart = this.core.length();
+    active.frozenAt = this.txStart;
   }
 
   compact(targetCore: Core): Database {
@@ -1682,6 +1699,24 @@ export class Database {
     return this.checkHashBytes(target.hash);
   }
 
+  // reject writes into frozen data; the current transaction's root slot remains writable
+  checkFrozenSlot(slotPtr: SlotPointer): void {
+    const active = this.transaction;
+    if (active !== null && active.frozenAt !== null && slotPtr.position !== null
+      && slotPtr.position < active.frozenAt && slotPtr.position !== active.rootPosition) {
+      throw new Error('Writer points into frozen data; reacquire it from the transaction root');
+    }
+  }
+
+  // copy frozen collection storage before mutation to preserve existing readers
+  copyCollectionIfFrozen(slotPtr: SlotPointer, isTopLevel: boolean, init: PathPart): SlotPointer {
+    if (!isTopLevel && this.transaction !== null
+      && this.transaction.frozenAt !== null && slotPtr.slot.value < this.transaction.frozenAt) {
+      return init.readSlotPointer(this, false, WriteMode.READ_WRITE, [init], 0, slotPtr);
+    }
+    return slotPtr;
+  }
+
   readSlotPointer(
     writeMode: WriteMode,
     path: PathPart[],
@@ -1695,6 +1730,7 @@ export class Database {
       return slotPtr;
     }
 
+    if (writeMode === WriteMode.READ_WRITE) this.checkFrozenSlot(slotPtr);
     const part = path[pathI];
     const isTopLevel = slotPtr.slot.value === BigInt(Header.LENGTH);
 

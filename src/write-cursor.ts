@@ -40,7 +40,8 @@ export class WriteCursor extends ReadCursor {
     this.transaction = slotPtr.position === null ? null : transaction;
   }
 
-  checkWrite(): void {
+  // require the active transaction and a writable slot
+  checkWritable(): void {
     const active = this.db.transaction;
     if (this.transaction !== null && this.transaction !== active) {
       throw new Error('Writer belongs to an expired transaction');
@@ -48,16 +49,28 @@ export class WriteCursor extends ReadCursor {
     if (this.slotPtr.position !== null && this.db.header.tag === Tag.ARRAY_LIST && this.transaction === null) {
       throw new Error('Writer was created outside a transaction');
     }
+    this.db.checkFrozenSlot(this.slotPtr);
+  }
+
+  // reload after freezing because copy-on-write may change where the slot points
+  private reloadSlot(): void {
+    if (this.transaction !== null && this.transaction.frozenAt !== null && this.slotPtr.position !== null) {
+      this.db.core.seek(this.slotPtr.position);
+      const bytes = new Uint8Array(Slot.LENGTH);
+      this.db.core.reader().readFully(bytes);
+      this.slotPtr = this.slotPtr.withSlot(Slot.fromBytes(bytes));
+    }
   }
 
   writePath(path: PathPart[]): WriteCursor {
-    this.checkWrite();
+    this.checkWritable();
     const startsTransaction = this.db.transaction === null && this.slotPtr.position === null
       && (this.db.header.tag === Tag.ARRAY_LIST || (path.length > 0 && path[0] instanceof ArrayListInit));
     if (startsTransaction) this.db.transaction = new Transaction();
     try {
       let slotPtr: SlotPointer;
       try {
+        this.reloadSlot();
         slotPtr = this.db.readSlotPointer(WriteMode.READ_WRITE, path, 0, this.slotPtr);
       } catch (e) {
         // only truncate when the error escapes the outer write.
@@ -72,7 +85,10 @@ export class WriteCursor extends ReadCursor {
       if (this.db.txStart === null) {
         this.db.core.sync();
       }
-      return new WriteCursor(slotPtr, this.db);
+      this.reloadSlot();
+      const cursor = new WriteCursor(slotPtr, this.db);
+      cursor.reloadSlot();
+      return cursor;
     } finally {
       if (startsTransaction) this.db.transaction = null;
     }
@@ -84,7 +100,7 @@ export class WriteCursor extends ReadCursor {
   }
 
   writeIfEmpty(data: WriteableData): void {
-    this.checkWrite();
+    this.checkWritable();
     if (this.slotPtr.slot.empty()) {
       this.write(data);
     }
@@ -100,7 +116,7 @@ export class WriteCursor extends ReadCursor {
   }
 
   writer(): Writer {
-    this.checkWrite();
+    this.checkWritable();
     const writer = this.db.core.writer();
     const ptrPos = this.db.core.length();
     this.db.core.seek(ptrPos);
@@ -139,7 +155,7 @@ export class Writer {
   }
 
   write(buffer: Uint8Array): void {
-    this.parent.checkWrite();
+    this.checkWritable();
     if (this.size < this.relativePosition) throw new EndOfStreamException();
     const newPosition = this.relativePosition + buffer.length;
 
@@ -160,7 +176,7 @@ export class Writer {
   }
 
   finish(): void {
-    this.parent.checkWrite();
+    this.checkWritable();
     const writer = this.parent.db.core.writer();
 
     if (this.formatTag !== null) {
@@ -180,6 +196,15 @@ export class Writer {
     writer.write(this.slot.toBytes());
 
     this.parent.slotPtr = this.parent.slotPtr.withSlot(this.slot);
+  }
+
+  // validate the parent cursor and reject writes to frozen bytes
+  private checkWritable(): void {
+    this.parent.checkWritable();
+    const active = this.parent.db.transaction;
+    if (active !== null && active.frozenAt !== null && this.slot.value < active.frozenAt) {
+      throw new Error('Byte writer points into frozen data');
+    }
   }
 
   seek(position: number): void {
