@@ -710,9 +710,11 @@ function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null): 
   }
 
   // opening the db leaves trailing data alone, because it may
-  // belong to another writer's unfinished transaction.
+  // belong to another writer's unfinished transaction. the next
+  // write transaction truncates it before allocating new data.
   {
-    core.seek(core.length());
+    const sizeBefore = core.length();
+    core.seek(sizeBefore);
 
     const writer = core.writer();
     writer.write(new TextEncoder().encode('this is trailing data from an unfinished transaction'));
@@ -723,6 +725,8 @@ function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null): 
 
     const sizeAfter = core.length();
     assert.strictEqual(sizeWithTail, sizeAfter);
+    new WriteArrayList(db.rootCursor());
+    assert.strictEqual(sizeBefore, core.length());
   }
 
   // Cloning

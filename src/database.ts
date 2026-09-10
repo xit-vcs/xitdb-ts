@@ -506,6 +506,8 @@ export class ArrayListGet implements PathPartBase {
     pathI: number,
     slotPtr: SlotPointer
   ): SlotPointer {
+    if (writeMode === WriteMode.READ_WRITE && isTopLevel && db.header.tag === Tag.ARRAY_LIST) throw new WriteNotAllowedException();
+
     const tag = isTopLevel ? db.header.tag : slotPtr.slot.tag;
     switch (tag) {
       case Tag.NONE:
@@ -1486,6 +1488,7 @@ export class Context implements PathPartBase {
     slotPtr: SlotPointer
   ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
+    if (isTopLevel && db.header.tag === Tag.ARRAY_LIST) throw new CursorNotWriteableException();
     if (pathI !== path.length - 1) throw new PathPartMustBeAtEndException();
 
     const nextCursor = new WriteCursor(slotPtr, db);
@@ -1641,16 +1644,9 @@ export class Database {
     targetCore.seek(0);
     target.header.write(targetCore);
 
-    // flush, update file_size, flush again
-    targetCore.flush();
-    const fileSize = targetCore.length();
-    targetCore.seek(Header.LENGTH + ArrayListHeader.LENGTH);
-    targetWriter.writeLong(fileSize);
-    targetCore.flush();
-
     // fsync so the compacted database is durable, since callers
     // typically rename it over an existing database file
-    targetCore.sync();
+    target.updateCommittedSize();
 
     return target;
   }
@@ -1694,6 +1690,19 @@ export class Database {
     }
     if (this.core.length() > committedSize) {
       this.core.setLength(committedSize);
+    }
+  }
+
+  private updateCommittedSize(): void {
+    this.core.sync();
+    if (this.header.tag === Tag.ARRAY_LIST) {
+      this.core.seek(Header.LENGTH + ArrayListHeader.LENGTH);
+      const committedSize = this.core.reader().readLong();
+      const fileSize = this.core.length();
+      if (fileSize === committedSize) return;
+      this.core.seek(Header.LENGTH + ArrayListHeader.LENGTH);
+      this.core.writer().writeLong(fileSize);
+      this.core.sync();
     }
   }
 
@@ -1741,10 +1750,12 @@ export class Database {
 
     if (writeMode === WriteMode.READ_WRITE) this.checkFrozenSlot(slotPtr);
     const part = path[pathI];
-    const isTopLevel = slotPtr.slot.value === BigInt(Header.LENGTH);
+    const isTopLevel = slotPtr.position === null && slotPtr.slot.value === BigInt(Header.LENGTH);
 
     const isTxStart = writeMode === WriteMode.READ_WRITE && isTopLevel && this.header.tag === Tag.ARRAY_LIST && this.txStart === null;
     if (isTxStart) {
+      // discard data left by an unfinished transaction after a crash.
+      this.truncate();
       this.txStart = this.core.length();
     }
 
@@ -2082,9 +2093,7 @@ export class Database {
             writer.write(new Uint8Array(INDEX_BLOCK_SIZE));
 
             if (isTopLevel) {
-              const fileSize = this.core.length();
-              this.core.seek(Header.LENGTH + ArrayListHeader.LENGTH);
-              writer.writeLong(fileSize);
+              this.updateCommittedSize();
             }
 
             this.core.seek(slotPos);

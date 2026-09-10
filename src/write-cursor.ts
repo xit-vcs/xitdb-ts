@@ -16,6 +16,7 @@ import {
 } from './read-cursor.js';
 import {
   CursorNotWriteableException,
+  ExpectedTxStartException,
   EndOfStreamException,
   UnexpectedWriterPositionException,
 } from './exceptions.js';
@@ -121,6 +122,7 @@ export class WriteCursor extends ReadCursor {
 
   writer(): Writer {
     this.checkWritable();
+    if (this.db.header.tag === Tag.ARRAY_LIST && this.db.txStart === null) throw new ExpectedTxStartException();
     const writer = this.db.core.writer();
     const ptrPos = this.db.core.length();
     this.db.core.seek(ptrPos);
@@ -200,11 +202,13 @@ export class Writer {
     writer.write(this.slot.toBytes());
 
     this.parent.slotPtr = this.parent.slotPtr.withSlot(this.slot);
+    if (this.parent.db.txStart === null) this.parent.db.core.sync();
   }
 
   // validate the parent cursor and reject writes to frozen bytes
   private checkWritable(): void {
     this.parent.checkWritable();
+    if (this.parent.db.header.tag === Tag.ARRAY_LIST && this.parent.db.txStart === null) throw new ExpectedTxStartException();
     const active = this.parent.db.transaction;
     if (active !== null && active.frozenAt !== null && this.slot.value < active.frozenAt) {
       throw new Error('Byte writer points into frozen data');

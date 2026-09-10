@@ -78,7 +78,11 @@ class RandomAccessBufferedFile implements DataReader, DataWriter, Disposable {
   }
 
   length(): number {
-    return Math.max(this.memoryPos + this.memory.length(), this.file.length());
+    const bufferSize = this.memory.length();
+    // a failed allocation after seeking past eof can leave an empty
+    // buffer beyond the file's end, even after rollback.
+    if (bufferSize === 0) return this.file.length();
+    return Math.max(this.memoryPos + bufferSize, this.file.length());
   }
 
   position(): number {

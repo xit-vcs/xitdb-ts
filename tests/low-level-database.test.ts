@@ -23,6 +23,7 @@ import {
   InvalidVersionException,
   KeyNotFoundException,
   EndOfStreamException,
+  CursorNotWriteableException,
   ArrayListInit,
   ArrayListGet,
   ArrayListAppend,
@@ -112,7 +113,7 @@ describe('Low Level API', () => {
     const history = new WriteArrayList(db.rootCursor());
     assert.throws(() => db.rootCursor().writePath([
       new Context(cursor => history.append(new Int(999))),
-    ]), /Nested top-level writes are not allowed/);
+    ]), CursorNotWriteableException);
     assert.strictEqual(history.count(), 0);
     let escaped: WriteHashMap;
     let bytes: Writer;
@@ -1069,7 +1070,8 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
     // slice the inner array list so it contains exactly SLOT_COUNT, so we have the old root again
     rootCursor.writePath([
       new ArrayListInit(),
-      new ArrayListGet(-1),
+      new ArrayListAppend(),
+      new WriteData(rootCursor.readPathSlot([new ArrayListGet(-1)])),
       new ArrayListInit(),
       new ArrayListSlice(SLOT_COUNT),
     ]);
@@ -1169,7 +1171,8 @@ function testLowLevelApi(core: Core, hasher: Hasher): void {
     {
       rootCursor.writePath([
         new ArrayListInit(),
-        new ArrayListGet(-1),
+        new ArrayListAppend(),
+        new WriteData(rootCursor.readPathSlot([new ArrayListGet(-1)])),
         new ArrayListInit(),
         new ArrayListGet(0),
         new WriteData(null),
