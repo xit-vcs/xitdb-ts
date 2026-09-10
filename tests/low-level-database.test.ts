@@ -67,6 +67,7 @@ describe('Low Level API', () => {
         const equivalent = (map.cursor as WriteCursor).writePath([]);
         const frozen = new ReadHashMap(new ReadCursor(map.cursor.slotPtr, db));
         db.freeze();
+        assert.deepStrictEqual(new ReadHashMap(frozen.getCursor('child')!).slot(), child.slot());
         assert.throws(() => child.put('v', new Int(999)), /Writer points into frozen data/);
         equivalent.writePath([
           new HashMapGet(new HashMapGetValue(db.hasher.digest(new TextEncoder().encode('v')))),
@@ -132,6 +133,7 @@ describe('Low Level API', () => {
       assert.throws(() => history.slice(0), /Nested top-level writes are not allowed/);
     });
     reject();
+    assert.deepStrictEqual(history.getSlot(0), escaped!.slot());
     history.appendContext(history.getSlot(0), cursor => {
       reject();
       new WriteHashMap(cursor).put('v', new Int(2));
@@ -143,6 +145,9 @@ describe('Low Level API', () => {
       throw new Error('rollback');
     }), /rollback/);
     reject();
+    assert.throws(() => escaped.slot(), /Writer belongs to an aborted transaction/);
+    assert.throws(() => history.appendContext(null, cursor => cursor.write(escaped.slot())), /Writer belongs to an aborted transaction/);
+    assert.strictEqual(history.count(), 2);
     history.appendContext(history.getSlot(1), cursor => reject());
     assert.strictEqual(new ReadHashMap(history.getCursor(2)!).getCursor('v')!.readInt(), 2);
   });

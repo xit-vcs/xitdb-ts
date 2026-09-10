@@ -1541,6 +1541,7 @@ function bigIntShiftRight(value: Uint8Array, bits: number): bigint {
 }
 
 export class Transaction {
+  aborted = false;
   rootPosition: number | null = null;
   frozenAt: number | null = null;
 }
