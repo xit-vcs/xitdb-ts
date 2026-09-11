@@ -81,15 +81,11 @@ class RandomAccessMemory implements DataReader, DataWriter {
   }
 
   setLength(len: number): void {
-    if (len === 0) {
-      this.reset();
-    } else {
-      if (len > this._count) throw new Error('Cannot extend length');
-      this._count = len;
-      if (this._position > len) {
-        this._position = len;
-      }
+    if (!Number.isInteger(len) || len < 0 || len > this._count) throw new RangeError('Invalid memory length');
+    if (len === 0 || this._position > len) {
+      this._position = len;
     }
+    this._count = len;
   }
 
   reset(): void {

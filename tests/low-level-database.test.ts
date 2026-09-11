@@ -217,6 +217,32 @@ describe('Low Level API', () => {
     const allBytes = new Uint8Array(Number(textCursor.count()));
     reader.readFully(allBytes);
     assert.strictEqual(new TextDecoder().decode(allBytes), 'goodbye, cruel world!');
+
+    core.setLength(0);
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    core.writer().write(bytes);
+    core.seek(1);
+
+    // invalid lengths must leave the contents and position alone
+    for (const length of [5, -1, Number.MIN_SAFE_INTEGER, 1.5, NaN, Infinity]) {
+      assert.throws(() => core.setLength(length), RangeError);
+      assert.strictEqual(core.position(), 1);
+      assert.deepStrictEqual(core.memory.toByteArray(), bytes);
+    }
+
+    // truncation preserves an earlier position and clamps one past the end
+    core.setLength(3);
+    assert.strictEqual(core.position(), 1);
+    core.setLength(3);
+    assert.strictEqual(core.position(), 1);
+    core.seek(3);
+    core.setLength(2);
+    assert.strictEqual(core.length(), 2);
+    assert.strictEqual(core.position(), 2);
+    assert.deepStrictEqual(core.memory.toByteArray(), new Uint8Array([1, 2]));
+    assert.throws(() => core.reader().readByte(), /End of stream/);
+    core.writer().writeByte(9);
+    assert.deepStrictEqual(core.memory.toByteArray(), new Uint8Array([1, 2, 9]));
   });
 });
 
