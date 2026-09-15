@@ -1746,7 +1746,7 @@ export class Database {
     slotPtr: SlotPointer
   ): SlotPointer {
     if (pathI === path.length) {
-      if (writeMode === WriteMode.READ_ONLY && slotPtr.slot.tag === Tag.NONE) {
+      if (writeMode === WriteMode.READ_ONLY && slotPtr.slot.empty()) {
         throw new KeyNotFoundException();
       }
       return slotPtr;
