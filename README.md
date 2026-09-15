@@ -580,3 +580,25 @@ assert.strictEqual(history.count(), 1);
 ```
 
 This compacted database will be in a separate file. If you want to delete the original database and replace it with this one, you'll need to do that yourself. It is not possible to compact a database in-place (using the same file as the target database); doing so would fail and would render your original database unreadable.
+
+The offsets map records where each copied object lives in the compacted database so shared references and cycles point to the same copied object. By default, compaction uses an in-memory `Map<number, number>`. It grows with the number of live objects copied, so it could theoretically OOM. To avoid this, you can instead use a temporary on-disk xitdb file to track the offsets with [FileOffsetMap](src/file-offset-map.ts):
+
+```typescript
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+// create a scratch file and delete it when compaction is finished
+const offsetsDir = mkdtempSync(join(tmpdir(), 'compact_offsets_'));
+try {
+  using offsetMap = new FileOffsetMap(join(offsetsDir, 'offsets.db'));
+  using compactCore = new CoreBufferedFile('compact.db');
+  const compactDb = db.compact(compactCore, offsetMap);
+
+  // read from the new compacted db
+  const history = new ReadArrayList(compactDb.rootCursor());
+  assert.strictEqual(history.count(), 1);
+} finally {
+  rmSync(offsetsDir, { recursive: true, force: true });
+}
+```

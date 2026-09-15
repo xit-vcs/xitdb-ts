@@ -46,6 +46,10 @@ export { CoreFile } from './core-file.js';
 export { CoreBufferedFile } from './core-buffered-file.js';
 export { Hasher } from './hasher.js';
 
+// compaction offsets
+export type { OffsetMap } from './offset-map.js';
+export { FileOffsetMap } from './file-offset-map.js';
+
 // Database
 export {
   Database,

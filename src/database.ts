@@ -1,4 +1,5 @@
 import type { Core } from './core.js';
+import type { OffsetMap } from './offset-map.js';
 import { Hasher } from './hasher.js';
 import { Tag, tagValueOf } from './tag.js';
 import { Slot } from './slot.js';
@@ -1594,8 +1595,10 @@ export class Database {
     active.frozenAt = this.txStart;
   }
 
-  compact(targetCore: Core): Database {
-    const offsetMap = new Map<number, number>();
+  /** clears and borrows the supplied offsets map without disposing it. */
+  compact(targetCore: Core, offsetMap: OffsetMap = new Map<number, number>()): Database {
+    // cached offsets only apply to this compaction's target
+    offsetMap.clear();
     const hasher = new Hasher(this.hasher.algorithm, this.header.hashId);
     const target = new Database(targetCore, hasher);
 
@@ -3094,7 +3097,7 @@ class Compactor {
     private readonly sourceCore: Core,
     private readonly targetCore: Core,
     private readonly hashSize: number,
-    private readonly offsetMap: Map<number, number>
+    private readonly offsetMap: OffsetMap
   ) {}
 
   private reserveBlock(size: number): number {

@@ -8,6 +8,8 @@ import {
   CoreMemory,
   CoreFile,
   CoreBufferedFile,
+  type OffsetMap,
+  FileOffsetMap,
   ReadArrayList,
   WriteArrayList,
   ReadHashMap,
@@ -946,7 +948,10 @@ describe('Compaction', () => {
     using sourceCore = new CoreMemory();
     using targetCore = new CoreMemory();
     const hasher = new Hasher('SHA-1');
-    testCompaction(sourceCore, targetCore, hasher, null, null);
+    const offsetMap = new Map<number, number>();
+    offsetMap.set(0, 123);
+    testCompaction(sourceCore, targetCore, hasher, null, null, offsetMap);
+    assert.strictEqual(offsetMap.get(0), undefined);
   });
 
   test('file storage', () => {
@@ -991,12 +996,34 @@ describe('Compaction', () => {
   });
 });
 
+test('compaction with disk-backed offsets map', () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-compact-offsets-'));
+  const sourcePath = join(tmpDir, 'source.db');
+  const targetPath = join(tmpDir, 'target.db');
+  try {
+    using offsetMap = new FileOffsetMap(join(tmpDir, 'offsets.db'));
+    using sourceCore = new CoreFile(sourcePath);
+    using targetCore = new CoreFile(targetPath);
+
+    // reusing a scratch map must discard offsets from previous compactions
+    offsetMap.set(0, 123);
+
+    // reuse the existing data type, cycle, sharing, and reopening checks
+    const hasher = new Hasher('SHA-1');
+    testCompaction(sourceCore, targetCore, hasher, sourcePath, targetPath, offsetMap);
+    assert.strictEqual(offsetMap.get(0), undefined);
+  } finally {
+    rmSync(tmpDir, { recursive: true });
+  }
+});
+
 function testCompaction(
   sourceCore: Core,
   targetCore: Core,
   hasher: Hasher,
   sourcePath: string | null,
-  targetPath: string | null
+  targetPath: string | null,
+  offsetMap?: OffsetMap
 ): void {
   const decoder = new TextDecoder();
 
@@ -1005,7 +1032,7 @@ function testCompaction(
     sourceCore.setLength(0);
     targetCore.setLength(0);
     const source = new Database(sourceCore, hasher);
-    const compacted = source.compact(targetCore);
+    const compacted = source.compact(targetCore, offsetMap);
     assert.strictEqual(compacted.header.tag, Tag.NONE);
   }
 
@@ -1113,7 +1140,7 @@ function testCompaction(
     const sourceSize = sourceCore.length();
 
     // compact
-    const compacted = source.compact(targetCore);
+    const compacted = source.compact(targetCore, offsetMap);
 
     const targetSize = targetCore.length();
 
@@ -1237,7 +1264,7 @@ function testCompaction(
       });
     }
 
-    const compacted = source.compact(targetCore);
+    const compacted = source.compact(targetCore, offsetMap);
 
     const history = new ReadArrayList(compacted.rootCursor());
     assert.strictEqual(history.count(), 1);
@@ -1274,7 +1301,7 @@ function testCompaction(
       }
 
       // compact
-      source.compact(targetCore);
+      source.compact(targetCore, offsetMap);
 
       // re-open the target
       targetCore.seek(0);
@@ -1305,7 +1332,7 @@ function testCompaction(
       }
 
       // compact
-      const compacted = source.compact(targetCore);
+      const compacted = source.compact(targetCore, offsetMap);
 
       // add new moment to compacted DB
       {
