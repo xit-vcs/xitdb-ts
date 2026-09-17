@@ -3,6 +3,7 @@ import { Slot } from './slot.js';
 import { SlotPointer } from './slot-pointer.js';
 import {
   Database,
+  Header,
   Transaction,
   ArrayListInit,
   WriteMode,
@@ -76,6 +77,12 @@ export class WriteCursor extends ReadCursor {
     // nested top-level writes could commit before the outer transaction ends
     if (this.db.transaction !== null && this.slotPtr.position === null && path.length > 0) {
       throw new Error('Nested top-level writes are not allowed');
+    }
+    // another instance may have initialized the top-level data since we read
+    // the header. initializing it again would discard its data. `rootCursor`
+    // checks as well, but this cursor may be older than that.
+    if (this.slotPtr.position === null && this.slotPtr.slot.value === BigInt(Header.LENGTH)) {
+      this.db.refreshHeader();
     }
     const startsTransaction = this.db.transaction === null && this.slotPtr.position === null
       && (this.db.header.tag === Tag.ARRAY_LIST || (path.length > 0 && path[0] instanceof ArrayListInit));

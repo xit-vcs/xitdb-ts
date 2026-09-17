@@ -1565,22 +1565,32 @@ export class Database {
       this.header.write(core);
       core.flush();
     } else {
-      this.header = Header.read(core);
-      this.header.validate();
-      if (this.header.hashSize !== hasher.digestLength) {
-        throw new InvalidHashSizeException();
-      }
+      this.header = this.readAndValidateHeader();
       this.validateCommittedSize();
     }
   }
 
-  rootCursor(): WriteCursor {
-    // if the header tag is none, try re-reading it.
-    // this may be necessary if the database was initialized on a different thread.
-    if (this.header.tag === Tag.NONE) {
-      this.core.seek(0);
-      this.header = Header.read(this.core);
+  private readAndValidateHeader(): Header {
+    this.core.seek(0);
+    const header = Header.read(this.core);
+    header.validate();
+    if (header.hashSize !== this.hasher.digestLength) {
+      throw new InvalidHashSizeException();
     }
+    return header;
+  }
+
+  // the root tag only changes once, when the top-level data is initialized.
+  // if we haven't seen that happen, another instance may have done it since
+  // we read the header.
+  refreshHeader(): void {
+    if (this.header.tag === Tag.NONE) {
+      this.header = this.readAndValidateHeader();
+    }
+  }
+
+  rootCursor(): WriteCursor {
+    this.refreshHeader();
     return new WriteCursor(
       new SlotPointer(null, new Slot(Header.LENGTH, this.header.tag)),
       this
