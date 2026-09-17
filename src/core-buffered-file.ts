@@ -51,9 +51,14 @@ const DEFAULT_BUFFER_SIZE = 8 * 1024 * 1024; // 8MB
 class RandomAccessBufferedFile implements DataReader, DataWriter, Disposable {
   public file: CoreFile;
   private memory: CoreMemory;
-  private bufferSize: number; // flushes when the memory is >= this size
+  private bufferSize: number; // flushes before the memory would grow beyond this size
   private filePos: number;
   private memoryPos: number;
+  // the file's length, cached so that `length` doesn't need to ask the OS
+  // every time data is allocated. another process may write to the file
+  // whenever this one isn't, so it is only set once we begin writing, and
+  // it is cleared when the writes are flushed.
+  private fileLen: number | null = null;
 
   constructor(filePath: string, bufferSize: number = DEFAULT_BUFFER_SIZE) {
     this.file = new CoreFile(filePath);
@@ -64,25 +69,16 @@ class RandomAccessBufferedFile implements DataReader, DataWriter, Disposable {
   }
 
   seek(pos: number): void {
-    // flush if we are going past the end of the in-memory buffer
-    if (pos > this.memoryPos + this.memory.length()) {
-      this.flush();
-    }
-
     this.filePos = pos;
-
-    // if the buffer is empty, set its position to this offset as well
-    if (this.memory.length() === 0) {
-      this.memoryPos = pos;
-    }
   }
 
   length(): number {
+    const fileLen = this.fileLen ?? this.file.length();
     const bufferSize = this.memory.length();
-    // a failed allocation after seeking past eof can leave an empty
-    // buffer beyond the file's end, even after rollback.
-    if (bufferSize === 0) return this.file.length();
-    return Math.max(this.memoryPos + bufferSize, this.file.length());
+    // a failed allocation or a rollback can leave an empty
+    // buffer positioned beyond the file's end.
+    if (bufferSize === 0) return fileLen;
+    return Math.max(this.memoryPos + bufferSize, fileLen);
   }
 
   position(): number {
@@ -98,18 +94,28 @@ class RandomAccessBufferedFile implements DataReader, DataWriter, Disposable {
     } else if (len < this.memoryPos + this.memory.length()) {
       this.memory.memory.setLength(len - this.memoryPos);
     }
+    this.fileLen = null;
     this.file.setLength(len);
     this.filePos = Math.min(len, this.filePos);
   }
 
   flush(): void {
+    this.fileLen = null;
     if (this.memory.length() > 0) {
-      this.file.seek(this.memoryPos);
-      this.file.writer().write(this.memory.memory.toByteArray());
-
-      this.memoryPos = 0;
+      this.writeToFile(this.memoryPos, this.memory.memory.toByteArray());
       this.memory.memory.reset();
     }
+  }
+
+  private writeToFile(pos: number, buffer: Uint8Array): void {
+    // if the write fails partway, the file's length is unknown
+    const fileLen = this.fileLen;
+    this.fileLen = null;
+
+    this.file.seek(pos);
+    this.file.writer().write(buffer);
+
+    if (fileLen !== null) this.fileLen = Math.max(fileLen, pos + buffer.length);
   }
 
   sync(): void {
@@ -125,11 +131,28 @@ class RandomAccessBufferedFile implements DataReader, DataWriter, Disposable {
   // DataWriter interface
 
   write(buffer: Uint8Array): void {
-    if (this.memory.length() + buffer.length > this.bufferSize) {
+    if (buffer.length === 0) return;
+
+    // the in-memory buffer is a single contiguous window of the file
+    // starting at memoryPos. start a new window at this position if
+    // the buffer is empty, the write is past the end of the window,
+    // or the write would grow the window beyond the max size.
+    const memorySize = this.memory.length();
+    if (
+      memorySize === 0 ||
+      this.filePos > this.memoryPos + memorySize ||
+      (this.filePos >= this.memoryPos && this.filePos - this.memoryPos + buffer.length > this.bufferSize)
+    ) {
       this.flush();
+      this.memoryPos = this.filePos;
     }
 
-    if (this.filePos >= this.memoryPos && this.filePos <= this.memoryPos + this.memory.length()) {
+    if (this.fileLen === null) {
+      this.fileLen = this.file.length();
+    }
+
+    if (this.filePos >= this.memoryPos && this.filePos - this.memoryPos + buffer.length <= this.bufferSize) {
+      // write to the in-memory buffer
       this.memory.seek(this.filePos - this.memoryPos);
       this.memory.memory.write(buffer);
     } else {
@@ -138,9 +161,7 @@ class RandomAccessBufferedFile implements DataReader, DataWriter, Disposable {
       if (this.filePos < this.memoryPos + this.memory.length() && this.filePos + buffer.length > this.memoryPos) {
         this.flush();
       }
-      // Write directly to file
-      this.file.seek(this.filePos);
-      this.file.writer().write(buffer);
+      this.writeToFile(this.filePos, buffer);
     }
 
     this.filePos += buffer.length;
