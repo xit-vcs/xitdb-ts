@@ -90,7 +90,14 @@ class RandomAccessBufferedFile implements DataReader, DataWriter, Disposable {
   }
 
   setLength(len: number): void {
-    this.flush();
+    // discard buffered bytes past the new end rather than flushing them.
+    // a rollback must not depend on writing the data it is throwing away,
+    // because that write may be what failed (e.g. the disk is full).
+    if (len <= this.memoryPos) {
+      this.memory.memory.reset();
+    } else if (len < this.memoryPos + this.memory.length()) {
+      this.memory.memory.setLength(len - this.memoryPos);
+    }
     this.file.setLength(len);
     this.filePos = Math.min(len, this.filePos);
   }
