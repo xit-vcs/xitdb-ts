@@ -12,7 +12,7 @@ export class ReadLinkedArrayList implements Slotted {
   constructor(cursor: ReadCursor);
   constructor(cursor?: ReadCursor) {
     if (cursor) {
-      switch (cursor.slotPtr.slot.tag) {
+      switch (cursor.resolved().slot.tag) {
         case Tag.NONE:
         case Tag.LINKED_ARRAY_LIST:
           this.cursor = cursor;

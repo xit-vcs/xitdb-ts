@@ -14,7 +14,7 @@ export class ReadSortedSet implements Slotted {
   constructor(cursor: ReadCursor);
   constructor(cursor?: ReadCursor) {
     if (cursor) {
-      switch (cursor.slotPtr.slot.tag) {
+      switch (cursor.resolved().slot.tag) {
         case Tag.NONE:
         case Tag.SORTED_MAP:
         case Tag.SORTED_SET:
@@ -62,8 +62,9 @@ export class ReadSortedSet implements Slotted {
 
   // number of keys strictly less than key
   rank(key: string | Bytes | Uint8Array): number {
-    if (this.cursor.slotPtr.slot.tag === Tag.NONE) return 0;
-    this.cursor.db.core.seek(Number(this.cursor.slotPtr.slot.value));
+    const slotPtr = this.cursor.resolved();
+    if (slotPtr.slot.tag === Tag.NONE) return 0;
+    this.cursor.db.core.seek(Number(slotPtr.slot.value));
     const reader = this.cursor.db.core.reader();
     const headerBytes = new Uint8Array(BTreeHeader.LENGTH);
     reader.readFully(headerBytes);

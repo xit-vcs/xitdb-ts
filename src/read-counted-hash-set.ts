@@ -6,7 +6,7 @@ import { UnexpectedTagException } from './exceptions.js';
 export class ReadCountedHashSet extends ReadHashSet {
   constructor(cursor: ReadCursor) {
     super();
-    switch (cursor.slotPtr.slot.tag) {
+    switch (cursor.resolved().slot.tag) {
       case Tag.NONE:
       case Tag.COUNTED_HASH_MAP:
       case Tag.COUNTED_HASH_SET:

@@ -7,8 +7,9 @@ import {
   WriteMode,
   ArrayListHeader,
   BTreeHeader,
-  KeyValuePair,
   type PathPart,
+  kvKeyOffset,
+  RootTrailer,
   ArrayListGet,
   INDEX_BLOCK_SIZE,
   BTREE_NODE_HEADER_SIZE,
@@ -23,6 +24,7 @@ import {
   InvalidOffsetException,
   KeyNotFoundException,
   ExpectedUnsignedLongException,
+  InvalidDatabaseException,
 } from './exceptions.js';
 import { Bytes } from './writeable-data.js';
 
@@ -43,13 +45,35 @@ export class ReadCursor implements Slotted {
     this.db = db;
   }
 
+  // for a streaming root cursor, this reads the root again (see `resolved`)
   slot(): Slot {
-    return this.slotPtr.slot;
+    return this.resolved().slot;
+  }
+
+  // a streaming root cursor only has a snapshot of the root slot,
+  // which goes stale after the next transaction, so read it again.
+  // the result points at the copy of the root slot in the newest
+  // trailer, not the root header, so it is a fixed snapshot: the
+  // trailer never changes, so everything read through it comes from
+  // one commit, even if more are made.
+  // every method that reads `slotPtr` must go through this.
+  resolved(): SlotPointer {
+    if (this.db.header.streaming() && this.db.isRoot(this.slotPtr)) {
+      const header = this.db.readRootHeader();
+      if (header.fileSize < RootTrailer.LENGTH) throw new InvalidDatabaseException();
+      // the root slot is the first thing in the trailer
+      return new SlotPointer(header.fileSize - RootTrailer.LENGTH, header.root);
+    }
+    return this.slotPtr;
+  }
+
+  resolvedCursor(): ReadCursor {
+    return new ReadCursor(this.resolved(), this.db);
   }
 
   readPath(path: PathPart[]): ReadCursor | null {
     try {
-      const slotPtr = this.db.readSlotPointer(WriteMode.READ_ONLY, path, 0, this.slotPtr);
+      const slotPtr = this.db.readSlotPointer(WriteMode.READ_ONLY, path, 0, this.resolved());
       return new ReadCursor(slotPtr, this.db);
     } catch (e) {
       if (e instanceof KeyNotFoundException) {
@@ -61,7 +85,7 @@ export class ReadCursor implements Slotted {
 
   readPathSlot(path: PathPart[]): Slot | null {
     try {
-      const slotPtr = this.db.readSlotPointer(WriteMode.READ_ONLY, path, 0, this.slotPtr);
+      const slotPtr = this.db.readSlotPointer(WriteMode.READ_ONLY, path, 0, this.resolved());
       if (!slotPtr.slot.empty()) {
         return slotPtr.slot;
       } else {
@@ -76,28 +100,31 @@ export class ReadCursor implements Slotted {
   }
 
   readUint(): number {
-    if (this.slotPtr.slot.tag !== Tag.UINT) {
+    const slotPtr = this.resolved();
+    if (slotPtr.slot.tag !== Tag.UINT) {
       throw new UnexpectedTagException();
     }
-    if (this.slotPtr.slot.value < 0n) throw new ExpectedUnsignedLongException();
-    return Number(this.slotPtr.slot.value);
+    if (slotPtr.slot.value < 0n) throw new ExpectedUnsignedLongException();
+    return Number(slotPtr.slot.value);
   }
 
   readInt(): number {
-    if (this.slotPtr.slot.tag !== Tag.INT) {
+    const slotPtr = this.resolved();
+    if (slotPtr.slot.tag !== Tag.INT) {
       throw new UnexpectedTagException();
     }
-    return Number(this.slotPtr.slot.value);
+    return Number(slotPtr.slot.value);
   }
 
   readFloat(): number {
-    if (this.slotPtr.slot.tag !== Tag.FLOAT) {
+    const slotPtr = this.resolved();
+    if (slotPtr.slot.tag !== Tag.FLOAT) {
       throw new UnexpectedTagException();
     }
     const buffer = new ArrayBuffer(8);
     const view = new DataView(buffer);
     // Write value as 8 bytes big-endian (using BigInt operations)
-    view.setBigInt64(0, this.slotPtr.slot.value, false);
+    view.setBigInt64(0, slotPtr.slot.value, false);
     return view.getFloat64(0, false);
   }
 
@@ -107,13 +134,14 @@ export class ReadCursor implements Slotted {
   }
 
   readBytesObject(maxSizeMaybe: number | null = null): Bytes {
+    const slotPtr = this.resolved();
     const reader = this.db.core.reader();
 
-    switch (this.slotPtr.slot.tag) {
+    switch (slotPtr.slot.tag) {
       case Tag.NONE:
         return new Bytes(new Uint8Array(0));
       case Tag.BYTES: {
-        this.db.core.seek(Number(this.slotPtr.slot.value));
+        this.db.core.seek(Number(slotPtr.slot.value));
         const valueSize = reader.readLong();
 
         if (maxSizeMaybe !== null && valueSize > maxSizeMaybe) {
@@ -126,7 +154,7 @@ export class ReadCursor implements Slotted {
         reader.readFully(value);
 
         let formatTag: Uint8Array | null = null;
-        if (this.slotPtr.slot.full) {
+        if (slotPtr.slot.full) {
           this.db.core.seek(startPosition + valueSize);
           formatTag = new Uint8Array(2);
           reader.readFully(formatTag);
@@ -138,10 +166,10 @@ export class ReadCursor implements Slotted {
         const buffer = new ArrayBuffer(8);
         const view = new DataView(buffer);
         // Write value as 8 bytes big-endian (using BigInt operations)
-        view.setBigInt64(0, this.slotPtr.slot.value, false);
+        view.setBigInt64(0, slotPtr.slot.value, false);
         const bytes = new Uint8Array(buffer);
 
-        const totalSize = this.slotPtr.slot.full ? bytes.length - 2 : bytes.length;
+        const totalSize = slotPtr.slot.full ? bytes.length - 2 : bytes.length;
 
         let valueSize = 0;
         for (const b of bytes) {
@@ -154,7 +182,7 @@ export class ReadCursor implements Slotted {
         }
 
         let formatTag: Uint8Array | null = null;
-        if (this.slotPtr.slot.full) {
+        if (slotPtr.slot.full) {
           formatTag = bytes.slice(totalSize, bytes.length);
         }
 
@@ -166,19 +194,9 @@ export class ReadCursor implements Slotted {
   }
 
   readKeyValuePair(): KeyValuePairCursor {
-    const reader = this.db.core.reader();
-
-    if (this.slotPtr.slot.tag !== Tag.KV_PAIR) {
-      throw new UnexpectedTagException();
-    }
-
-    this.db.core.seek(Number(this.slotPtr.slot.value));
-    const kvPairBytes = new Uint8Array(KeyValuePair.length(this.db.header.hashSize));
-    reader.readFully(kvPairBytes);
-    const kvPair = KeyValuePair.fromBytes(kvPairBytes, this.db.header.hashSize);
-
-    const hashPos = Number(this.slotPtr.slot.value);
-    const keySlotPos = hashPos + this.db.header.hashSize;
+    const slotPtr = this.resolved();
+    const kvPair = this.db.readKvPair(slotPtr.slot);
+    const keySlotPos = Number(slotPtr.slot.value) + kvKeyOffset(slotPtr.slot.tag, this.db.header.hashSize);
     const valueSlotPos = keySlotPos + Slot.LENGTH;
 
     return new KeyValuePairCursor(
@@ -189,11 +207,12 @@ export class ReadCursor implements Slotted {
   }
 
   reader(): Reader {
+    const slotPtr = this.resolved();
     const reader = this.db.core.reader();
 
-    switch (this.slotPtr.slot.tag) {
+    switch (slotPtr.slot.tag) {
       case Tag.BYTES: {
-        this.db.core.seek(Number(this.slotPtr.slot.value));
+        this.db.core.seek(Number(slotPtr.slot.value));
         const size = reader.readLong();
         const startPosition = this.db.core.position();
         return new Reader(this, size, startPosition, 0);
@@ -202,10 +221,10 @@ export class ReadCursor implements Slotted {
         const buffer = new ArrayBuffer(8);
         const view = new DataView(buffer);
         // Write value as 8 bytes big-endian (using BigInt operations)
-        view.setBigInt64(0, this.slotPtr.slot.value, false);
+        view.setBigInt64(0, slotPtr.slot.value, false);
         const bytes = new Uint8Array(buffer);
 
-        const totalSize = this.slotPtr.slot.full ? bytes.length - 2 : bytes.length;
+        const totalSize = slotPtr.slot.full ? bytes.length - 2 : bytes.length;
 
         let valueSize = 0;
         for (const b of bytes) {
@@ -213,7 +232,7 @@ export class ReadCursor implements Slotted {
           valueSize += 1;
         }
 
-        const startPosition = this.slotPtr.position! + 1;
+        const startPosition = slotPtr.position! + 1;
         return new Reader(this, valueSize, startPosition, 0);
       }
       default:
@@ -222,12 +241,13 @@ export class ReadCursor implements Slotted {
   }
 
   count(): number {
+    const slotPtr = this.resolved();
     const reader = this.db.core.reader();
-    switch (this.slotPtr.slot.tag) {
+    switch (slotPtr.slot.tag) {
       case Tag.NONE:
         return 0;
       case Tag.ARRAY_LIST: {
-        this.db.core.seek(Number(this.slotPtr.slot.value));
+        this.db.core.seek(Number(slotPtr.slot.value));
         const headerBytes = new Uint8Array(ArrayListHeader.LENGTH);
         reader.readFully(headerBytes);
         const header = ArrayListHeader.fromBytes(headerBytes);
@@ -236,24 +256,24 @@ export class ReadCursor implements Slotted {
       case Tag.LINKED_ARRAY_LIST:
       case Tag.SORTED_MAP:
       case Tag.SORTED_SET: {
-        this.db.core.seek(Number(this.slotPtr.slot.value));
+        this.db.core.seek(Number(slotPtr.slot.value));
         const headerBytes = new Uint8Array(BTreeHeader.LENGTH);
         reader.readFully(headerBytes);
         const header = BTreeHeader.fromBytes(headerBytes);
         return header.size;
       }
       case Tag.BYTES: {
-        this.db.core.seek(Number(this.slotPtr.slot.value));
+        this.db.core.seek(Number(slotPtr.slot.value));
         return reader.readLong();
       }
       case Tag.SHORT_BYTES: {
         const buffer = new ArrayBuffer(8);
         const view = new DataView(buffer);
         // Write value as 8 bytes big-endian (using BigInt operations)
-        view.setBigInt64(0, this.slotPtr.slot.value, false);
+        view.setBigInt64(0, slotPtr.slot.value, false);
         const bytes = new Uint8Array(buffer);
 
-        const totalSize = this.slotPtr.slot.full ? bytes.length - 2 : bytes.length;
+        const totalSize = slotPtr.slot.full ? bytes.length - 2 : bytes.length;
 
         let size = 0;
         for (const b of bytes) {
@@ -264,7 +284,7 @@ export class ReadCursor implements Slotted {
       }
       case Tag.COUNTED_HASH_MAP:
       case Tag.COUNTED_HASH_SET: {
-        this.db.core.seek(Number(this.slotPtr.slot.value));
+        this.db.core.seek(Number(slotPtr.slot.value));
         return reader.readLong();
       }
       default:
@@ -383,22 +403,23 @@ export class CursorIterator {
   private nextCursorMaybe: ReadCursor | null = null;
 
   constructor(cursor: ReadCursor) {
-    this.cursor = cursor;
+    this.cursor = cursor.resolvedCursor();
   }
 
   // resolve a possibly-negative start index against `size` to a 0-based rank.
   // negatives count from the end (-1 is the last entry); anything out of range
   // returns -1 (yield nothing).
   private static resolveStartIndex(index: number, size: number): number {
-    const resolved = index < 0 ? index + size : index;
-    if (resolved < 0 || resolved >= size) return -1;
-    return resolved;
+    const resolvedIndex = index < 0 ? index + size : index;
+    if (resolvedIndex < 0 || resolvedIndex >= size) return -1;
+    return resolvedIndex;
   }
 
   // start a sorted-map iterator at the entry with rank startIndex (the count descent),
   // iterating in key order from there. negative indexes count from the end.
-  static initSortedFromIndex(cursor: ReadCursor, startIndex: number): CursorIterator {
-    const it = new CursorIterator(cursor);
+  static initSortedFromIndex(unresolvedCursor: ReadCursor, startIndex: number): CursorIterator {
+    const it = new CursorIterator(unresolvedCursor);
+    const cursor = it.cursor;
     switch (cursor.slotPtr.slot.tag) {
       // an unwritten map is NONE (like iterator()): yield nothing
       case Tag.NONE:
@@ -424,8 +445,9 @@ export class CursorIterator {
   // start an array-list iterator at startIndex, descending the radix trie
   // straight to that index. negatives count from the end; out of range (or an
   // unwritten list) yields nothing.
-  static initArrayListFromIndex(cursor: ReadCursor, startIndex: number): CursorIterator {
-    const it = new CursorIterator(cursor);
+  static initArrayListFromIndex(unresolvedCursor: ReadCursor, startIndex: number): CursorIterator {
+    const it = new CursorIterator(unresolvedCursor);
+    const cursor = it.cursor;
     switch (cursor.slotPtr.slot.tag) {
       case Tag.NONE:
         return it;
@@ -453,8 +475,9 @@ export class CursorIterator {
 
   // start a linked-array-list iterator at startIndex, descending the
   // count-augmented b-tree straight to that index. negatives count from the end.
-  static initLinkedArrayListFromIndex(cursor: ReadCursor, startIndex: number): CursorIterator {
-    const it = new CursorIterator(cursor);
+  static initLinkedArrayListFromIndex(unresolvedCursor: ReadCursor, startIndex: number): CursorIterator {
+    const it = new CursorIterator(unresolvedCursor);
+    const cursor = it.cursor;
     switch (cursor.slotPtr.slot.tag) {
       case Tag.NONE:
         return it;
@@ -479,8 +502,9 @@ export class CursorIterator {
   }
 
   // start a sorted-map iterator at the first entry with key >= startKey
-  static initSortedFromKey(cursor: ReadCursor, startKey: Uint8Array): CursorIterator {
-    const it = new CursorIterator(cursor);
+  static initSortedFromKey(unresolvedCursor: ReadCursor, startKey: Uint8Array): CursorIterator {
+    const it = new CursorIterator(unresolvedCursor);
+    const cursor = it.cursor;
     switch (cursor.slotPtr.slot.tag) {
       case Tag.NONE:
         return it;

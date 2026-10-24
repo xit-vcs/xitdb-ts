@@ -1,6 +1,6 @@
 import { ReadHashSet } from './read-hash-set.js';
 import { WriteCursor, WriteCursorIterator } from './write-cursor.js';
-import { HashMapInit, HashMapGet, HashMapGetKey, HashMapRemove } from './database.js';
+import { HashMapInit, HashMapGet, HashMapGetKey, HashMapRemove, Context } from './database.js';
 import type { WriteableData } from './writeable-data.js';
 import { Bytes } from './writeable-data.js';
 import { KeyNotFoundException } from './exceptions.js';
@@ -61,10 +61,14 @@ export class WriteHashSet extends ReadHashSet {
 
   // Internal methods that take hash directly
   private putInternal(hash: Uint8Array, data: WriteableData): void {
-    const cursor = (this.cursor as WriteCursor).writePath([
+    // the key is written in the same write as the lookup, so this works
+    // even when the map is the root of a streaming database, where each
+    // write is its own transaction. keys are only written if empty,
+    // because their value should always be the same at a given hash.
+    (this.cursor as WriteCursor).writePath([
       new HashMapGet(new HashMapGetKey(hash)),
+      new Context((cursor: WriteCursor) => cursor.writeIfEmpty(data)),
     ]);
-    cursor.writeIfEmpty(data);
   }
 
   private putCursorInternal(hash: Uint8Array): WriteCursor {

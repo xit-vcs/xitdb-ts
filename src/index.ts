@@ -37,6 +37,9 @@ export {
   InvalidFormatTagSizeException,
   UnexpectedWriterPositionException,
   MaxShiftExceededException,
+  StreamingModeRequiredException,
+  InvalidRangeException,
+  TargetNotEmptyException,
 } from './exceptions.js';
 
 // Core
@@ -59,6 +62,13 @@ export {
   TopLevelArrayListHeader,
   BTreeHeader,
   KeyValuePair,
+  SortedKeyValuePair,
+  RootHeader,
+  RootTrailer,
+  type ReplicaState,
+  type ReplicaWriter,
+  ROOT_HEADER_START,
+  ROOT_HEADER_END,
   BTreeNode,
   BTreeNodeKind,
   BTreeNodeRef,

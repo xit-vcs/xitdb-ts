@@ -34,3 +34,6 @@ export class InvalidBTreeNodeException extends DatabaseException {}
 export class InvalidBTreeNodeKindException extends DatabaseException {}
 export class Uint64OverflowException extends DatabaseException {}
 export class Int64OverflowException extends DatabaseException {}
+export class StreamingModeRequiredException extends DatabaseException {}
+export class InvalidRangeException extends DatabaseException {}
+export class TargetNotEmptyException extends DatabaseException {}

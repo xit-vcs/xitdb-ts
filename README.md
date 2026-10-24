@@ -31,6 +31,7 @@ This database was originally made for the [xit version control system](https://g
 * [Iterators](#iterators)
 * [Hashing](#hashing)
 * [Compaction](#compaction)
+* [Replication](#replication)
 
 ## Example
 
@@ -42,8 +43,8 @@ using core = new CoreBufferedFile('main.db');
 const hasher = new Hasher('SHA-1');
 const db = new Database(core, hasher);
 
-// to get the benefits of immutability, the top-level data structure
-// must be an ArrayList, so each transaction is stored as an item in it
+// the top-level data structure is an ArrayList, so each transaction is
+// stored as an item in it, and past copies of the db stay readable
 const history = new WriteArrayList(db.rootCursor());
 
 // this is how a transaction is executed. we call history.appendContext,
@@ -122,9 +123,11 @@ A `Database` is initialized with an implementation of the `Core` interface, whic
 
 Every `Core` implements `Disposable`, so use a `using` declaration to release its resources when it leaves scope.
 
-Usually, you want to use a top-level `ArrayList` like in the example above, because that allows you to store a reference to each copy of the database (which I call a "moment"). This is how it supports transactions, despite not having any rollback journal or write-ahead log. It's an append-only database, so the data you are writing is invisible to any reader until the very last step, when the top-level list's header is updated.
+Since xitdb is an append-only database, the data you are writing is invisible to any reader until the very last step, when a small header at the start of the file is updated to point at it. This is how it supports transactions, despite not having any rollback journal or write-ahead log: if a transaction fails, the data it appended is simply discarded.
 
-You can also use a top-level `HashMap`, which is useful for ephemeral databases where immutability or transaction safety isn't necessary. Since xitdb supports in-memory databases, you could use it as an over-the-wire serialization format. Much like "Cap'n Proto", xitdb has no encoding/decoding step: you just give the buffer to xitdb and it can immediately read from it.
+Usually, you want to use a top-level `ArrayList` like in the example above, because that allows you to store a reference to each copy of the database (which I call a "moment"), so past copies stay readable and can be reverted to. If you don't need to keep past copies, you can also use a top-level `HashMap`. Keep in mind that each write to a top-level `HashMap` is its own transaction, so if you make many writes, group them into one transaction with `runContext`.
+
+Since xitdb supports in-memory databases, you could use it as an over-the-wire serialization format. Much like "Cap'n Proto", xitdb has no encoding/decoding step: you just give the buffer to xitdb and it can immediately read from it. You can send it over a network and read it with xitdb on the other end.
 
 ## Types
 
@@ -572,6 +575,8 @@ Normally, an immutable database grows forever, because old data is never deleted
 
 ```typescript
 using compactCore = new CoreBufferedFile('compact.db');
+// start from an empty file
+compactCore.setLength(0);
 const compactDb = db.compact(compactCore);
 
 // read from the new compacted db
@@ -579,21 +584,31 @@ const history = new ReadArrayList(compactDb.rootCursor());
 assert.strictEqual(history.count(), 1);
 ```
 
-This compacted database will be in a separate file. If you want to delete the original database and replace it with this one, you'll need to do that yourself. It is not possible to compact a database in-place (using the same file as the target database); doing so would fail and would render your original database unreadable.
+This compacted database will be in a separate file. If you want to delete the original database and replace it with this one, you'll need to do that yourself. The target must be a new or empty database, so compaction throws `TargetNotEmptyException` if it already has data, including when it is the original database's own file.
 
-The offsets map records where each copied object lives in the compacted database so shared references and cycles point to the same copied object. By default, compaction uses an in-memory `Map<number, number>`. It grows with the number of live objects copied, so it could theoretically OOM. To avoid this, you can instead use a temporary on-disk xitdb file to track the offsets with [FileOffsetMap](src/file-offset-map.ts):
+The offsets map records where each copied object lives in the compacted database so shared references and cycles point to the same copied object. By default, compaction uses an in-memory `Map<number, number>`. It grows with the number of live objects copied, so it could theoretically OOM. To avoid this, you can instead use a temporary on-disk xitdb file to track the offsets with [FileOffsetMap](src/file-offset-map.ts). Run the compaction inside a single transaction on it, so the offsets aren't each committed separately:
 
 ```typescript
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-// create a scratch file and delete it when compaction is finished
+// create a scratch database and delete it when compaction is finished
 const offsetsDir = mkdtempSync(join(tmpdir(), 'compact_offsets_'));
 try {
-  using offsetMap = new FileOffsetMap(join(offsetsDir, 'offsets.db'));
+  using offsetsCore = new CoreFile(join(offsetsDir, 'offsets.db'));
+  const offsetsDb = new Database(offsetsCore, new Hasher('SHA-1'));
+
+  // create the core for the new database, starting from an empty file
   using compactCore = new CoreBufferedFile('compact.db');
-  const compactDb = db.compact(compactCore, offsetMap);
+  compactCore.setLength(0);
+
+  // compact inside a transaction on the scratch database
+  let compactDb!: Database;
+  offsetsDb.runContext((cursor) => {
+    const offsetMap = new FileOffsetMap(cursor);
+    compactDb = db.compact(compactCore, offsetMap);
+  });
 
   // read from the new compacted db
   const history = new ReadArrayList(compactDb.rootCursor());
@@ -602,3 +617,50 @@ try {
   rmSync(offsetsDir, { recursive: true, force: true });
 }
 ```
+
+## Replication
+
+Since xitdb files are append-only, it is absurdly easy to replicate them: just copy the bytes that the destination doesn't have yet! Other databases like SQLite require complex external tools to replicate. In xitdb, once a transaction is committed, its bytes never change, except for a small header that points at the latest commit. That makes it easy to keep a copy of a database (a "replica") up to date, whether it's another file on the same machine or on another machine across a network.
+
+A sync takes four steps:
+
+```typescript
+// on the replica: describe what it already has
+const state = replica.replicaState();
+
+// on the source: decide which bytes to send
+const start = source.replicationStart(state);
+const end = source.committedSize();
+
+// on the source: write those bytes
+const chunks: Uint8Array[] = [];
+source.readCommitted(start, end, { write: (chunk) => chunks.push(chunk) });
+
+// on the replica: apply them
+const bytes = Buffer.concat(chunks);
+let position = 0;
+replica.applyReplicated(start, {
+  readFully: (buffer) => {
+    buffer.set(bytes.subarray(position, position + buffer.length));
+    position += buffer.length;
+  },
+}, end - start);
+```
+
+Over a network, the replica sends its `ReplicaState` (two values: its committed size and a checksum of its latest commit), and the source replies with `start`, the length, and then the bytes. `readCommitted` writes the bytes in chunks to anything with a `write` method, and `applyReplicated` reads them from anything with a `readFully` method, so they don't need to be in memory all at once.
+
+Network data usually arrives asynchronously, though, which a `readFully` method can't wait for. In that case, use `openReplicated(start, len)` instead: it returns a writer that takes the bytes as they arrive and commits them when it is closed. For example, with the body of a `fetch` response:
+
+```typescript
+const writer = replica.openReplicated(start, len);
+for await (const chunk of response.body!) writer.write(chunk);
+writer.close(); // commits the bytes
+```
+
+If the connection drops before all `len` bytes arrive, `close` throws and the replica stays at its last commit.
+
+A replica can start out as any new database. Each database has a random file ID, so the first sync sees that the replica isn't a copy of the source and sends the entire source file, replacing the replica. The same happens if the replica can no longer be extended, such as when the source is replaced by a compacted copy (which is a new file) or restored from an older backup: `replicationStart` returns 0, and the replica is replaced with a full copy.
+
+If a sync is interrupted, such as by a dropped connection, the replica stays at its last commit, and the next sync discards whatever was partially written. The exception is when `start` is 0: the replica is truncated before the copy begins, so an interrupted copy leaves it unusable until the next sync succeeds. If that matters to you, check whether `start` is 0, and if so, write the copy to a new file and only replace the old replica after `applyReplicated` succeeds.
+
+Only change a replica with `applyReplicated`. If you write to it directly, it no longer matches the source, and the next sync will replace it.

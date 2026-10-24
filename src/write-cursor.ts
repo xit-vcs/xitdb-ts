@@ -3,7 +3,6 @@ import { Slot } from './slot.js';
 import { SlotPointer } from './slot-pointer.js';
 import {
   Database,
-  Header,
   Transaction,
   ArrayListInit,
   WriteMode,
@@ -39,19 +38,24 @@ export class WriteCursor extends ReadCursor {
 
   constructor(slotPtr: SlotPointer, db: Database, transaction: Transaction | null = db.transaction) {
     super(slotPtr, db);
-    this.transaction = slotPtr.position === null ? null : transaction;
+    this.transaction = db.isRoot(slotPtr) ? null : transaction;
   }
 
   // require the active transaction and a writable slot
   checkWritable(): void {
     const active = this.db.transaction;
     if (this.transaction !== null && this.transaction !== active) {
-      throw new Error('Writer belongs to an expired transaction');
+      throw new ExpectedTxStartException('Writer belongs to an expired transaction');
     }
-    if (this.slotPtr.position !== null && this.db.header.tag === Tag.ARRAY_LIST && this.transaction === null) {
-      throw new Error('Writer was created outside a transaction');
+    // writes to moments must run inside a transaction.
+    if (!this.db.isRoot(this.slotPtr) && this.db.transactional() && this.transaction === null) {
+      throw new ExpectedTxStartException('Writer was created outside a transaction');
     }
     this.db.checkFrozenSlot(this.slotPtr);
+  }
+
+  override resolvedCursor(): WriteCursor {
+    return new WriteCursor(this.resolved(), this.db, this.transaction);
   }
 
   slot(): Slot {
@@ -75,17 +79,17 @@ export class WriteCursor extends ReadCursor {
   writePath(path: PathPart[]): WriteCursor {
     this.checkWritable();
     // nested top-level writes could commit before the outer transaction ends
-    if (this.db.transaction !== null && this.slotPtr.position === null && path.length > 0) {
+    if (this.db.transaction !== null && this.db.isRoot(this.slotPtr) && path.length > 0) {
       throw new Error('Nested top-level writes are not allowed');
     }
     // another instance may have initialized the top-level data since we read
     // the header. initializing it again would discard its data. `rootCursor`
     // checks as well, but this cursor may be older than that.
-    if (this.slotPtr.position === null && this.slotPtr.slot.value === BigInt(Header.LENGTH)) {
+    if (this.db.isRoot(this.slotPtr)) {
       this.db.refreshHeader();
     }
-    const startsTransaction = this.db.transaction === null && this.slotPtr.position === null
-      && (this.db.header.tag === Tag.ARRAY_LIST || (path.length > 0 && path[0] instanceof ArrayListInit));
+    const startsTransaction = this.db.transaction === null && this.db.isRoot(this.slotPtr)
+      && (this.db.transactional() || (path.length > 0 && path[0] instanceof ArrayListInit));
     if (startsTransaction) this.db.transaction = new Transaction();
     try {
       let slotPtr: SlotPointer;
@@ -122,7 +126,7 @@ export class WriteCursor extends ReadCursor {
 
   writeIfEmpty(data: WriteableData): void {
     this.checkWritable();
-    if (this.slotPtr.slot.empty()) {
+    if (this.resolved().slot.empty()) {
       this.write(data);
     }
   }
@@ -138,7 +142,10 @@ export class WriteCursor extends ReadCursor {
 
   writer(): Writer {
     this.checkWritable();
-    if (this.db.header.tag === Tag.ARRAY_LIST && this.db.txStart === null) throw new ExpectedTxStartException();
+    // in streaming mode, bytes are written to the root with
+    // `write`, which runs inside a transaction
+    if (this.db.header.streaming() && this.db.isRoot(this.slotPtr)) throw new CursorNotWriteableException();
+    if (this.db.transactional() && this.db.txStart === null) throw new ExpectedTxStartException();
     const writer = this.db.core.writer();
     const ptrPos = this.db.core.length();
     this.db.core.seek(ptrPos);
@@ -224,7 +231,7 @@ export class Writer {
   // validate the parent cursor and reject writes to frozen bytes
   private checkWritable(): void {
     this.parent.checkWritable();
-    if (this.parent.db.header.tag === Tag.ARRAY_LIST && this.parent.db.txStart === null) throw new ExpectedTxStartException();
+    if (this.parent.db.transactional() && this.parent.db.txStart === null) throw new ExpectedTxStartException();
     const active = this.parent.db.transaction;
     if (active !== null && active.frozenAt !== null && this.slot.value < active.frozenAt) {
       throw new Error('Byte writer points into frozen data');

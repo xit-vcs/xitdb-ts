@@ -1,6 +1,7 @@
-import type { Core } from './core.js';
+import type { Core, DataReader, DataWriter } from './core.js';
 import type { OffsetMap } from './offset-map.js';
 import { Hasher } from './hasher.js';
+import { crc64 } from './crc64.js';
 import { Tag, tagValueOf } from './tag.js';
 import { Slot } from './slot.js';
 import { SlotPointer } from './slot-pointer.js';
@@ -26,11 +27,15 @@ import {
   MaxShiftExceededException,
   InvalidBTreeNodeException,
   InvalidBTreeNodeKindException,
+  StreamingModeRequiredException,
+  InvalidRangeException,
+  EndOfStreamException,
+  TargetNotEmptyException,
 } from './exceptions.js';
 import { Bytes, Float, Int, Uint, type WriteableData } from './writeable-data.js';
 import { WriteCursor } from './write-cursor.js';
 
-export const VERSION = 0;
+export const VERSION = 1;
 export const MAGIC_NUMBER = new Uint8Array([0x78, 0x69, 0x74]); // 'xit'
 export const BIT_COUNT = 4;
 export const SLOT_COUNT = 1 << BIT_COUNT;
@@ -47,8 +52,9 @@ export const BTREE_NODE_HEADER_SIZE = 2;
 export const BTREE_LEAF_BLOCK_SIZE = BTREE_NODE_HEADER_SIZE + Slot.LENGTH * BTREE_SLOT_COUNT;
 export const BTREE_BRANCH_BLOCK_SIZE = BTREE_NODE_HEADER_SIZE + (Slot.LENGTH + 8) * BTREE_SLOT_COUNT;
 // sorted_map / sorted_set node block: [kind: u8][num: u8] then, for a leaf,
-// BTREE_SLOT_COUNT .kv_pair slots; for a branch, BTREE_SLOT_COUNT child slots, then
-// BTREE_SLOT_COUNT separator slots, then BTREE_SLOT_COUNT u64 counts
+// BTREE_SLOT_COUNT .sorted_kv_pair slots (.kv_pair for entries written by version 0);
+// for a branch, BTREE_SLOT_COUNT child slots, then BTREE_SLOT_COUNT separator slots,
+// then BTREE_SLOT_COUNT u64 counts
 export const SORTED_LEAF_BLOCK_SIZE = BTREE_NODE_HEADER_SIZE + Slot.LENGTH * BTREE_SLOT_COUNT;
 export const SORTED_BRANCH_BLOCK_SIZE = BTREE_NODE_HEADER_SIZE + (Slot.LENGTH * 2 + 8) * BTREE_SLOT_COUNT;
 
@@ -64,7 +70,12 @@ export class Header {
   constructor(
     public hashId: number,
     public hashSize: number,
+    // the file format version. any version above 0 is streaming mode.
     public version: number,
+    // the root tag, representing the type of the top-level data.
+    // in version 0 databases, it starts as NONE and becomes ARRAY_LIST
+    // once ArrayListInit is first called. in streaming mode it stays
+    // NONE, because the root slot carries the type instead.
     public tag: Tag,
     public magicNumber: Uint8Array
   ) {}
@@ -105,6 +116,19 @@ export class Header {
     if (this.version > VERSION) {
       throw new InvalidVersionException();
     }
+    if (this.streaming() && this.tag !== Tag.NONE) {
+      throw new InvalidDatabaseException();
+    }
+  }
+
+  // whether the database is in streaming mode, which every version above 0
+  // is (new databases always are). the top-level data is a root slot of any
+  // type, and every write to it is a copy-on-write transaction that appends
+  // a trailer holding the new root slot. the root header only caches the
+  // latest trailer, so every other committed byte is immutable, and a
+  // replica stays in sync by copying the bytes it doesn't have.
+  streaming(): boolean {
+    return this.version > 0;
   }
 
   withTag(tag: Tag): Header {
@@ -164,6 +188,98 @@ export class TopLevelArrayListHeader {
   }
 }
 
+// streaming mode only. the database header is followed by a random file ID,
+// which never changes, and then the root header. the file ID is part of every
+// trailer's checksum, so a replica can't be extended with bytes from a
+// different file.
+export const ROOT_HEADER_START = Header.LENGTH + 8;
+
+// streaming mode only. rewritten at every commit, as a cache of the latest
+// trailer. the root slot comes first on disk.
+export class RootHeader {
+  static readonly LENGTH = Slot.LENGTH + 8;
+
+  constructor(public fileSize: number, public root: Slot) {}
+
+  toBytes(): Uint8Array {
+    const buffer = new Uint8Array(RootHeader.LENGTH);
+    buffer.set(this.root.toBytes(), 0);
+    new DataView(buffer.buffer).setBigUint64(Slot.LENGTH, BigInt(this.fileSize), false);
+    return buffer;
+  }
+
+  static fromBytes(bytes: Uint8Array): RootHeader {
+    const root = Slot.fromBytes(bytes.subarray(0, Slot.LENGTH));
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const fileSize = Number(view.getBigUint64(Slot.LENGTH, false));
+    return new RootHeader(fileSize, root);
+  }
+}
+
+export const ROOT_HEADER_END = ROOT_HEADER_START + RootHeader.LENGTH;
+
+// streaming mode only. appended at the end of every transaction, so the
+// committed bytes (up to the root header's `fileSize`) always end with one.
+// the root slot comes first on disk.
+export class RootTrailer {
+  static readonly LENGTH = Slot.LENGTH + 16;
+
+  constructor(
+    public checksum: bigint,
+    // random for every transaction except the first, so separately written
+    // copies of a file can't end up with the same trailers, even when they
+    // write data of the same size. that is how a replica notices it is being
+    // sent bytes from a different history.
+    public commitId: bigint,
+    public root: Slot,
+  ) {}
+
+  static init(fileId: bigint, position: number, root: Slot, commitId: bigint): RootTrailer {
+    return new RootTrailer(RootTrailer.computeChecksum(fileId, position, root.toBytes(), commitId), commitId, root);
+  }
+
+  // CRC-64/XZ of the file ID, the trailer's position, the root slot, and the
+  // commit ID, all big endian. including the file ID and position means the
+  // trailer can't be mistaken for one written elsewhere. 64 bits makes it safe
+  // to find the last trailer by scanning a file whose root header can't be
+  // trusted. the root slot is given as bytes, so a trailer can be checked
+  // before its tag is validated.
+  static computeChecksum(fileId: bigint, position: number, root: Uint8Array, commitId: bigint): bigint {
+    const bytes = new Uint8Array(24 + Slot.LENGTH);
+    const view = new DataView(bytes.buffer);
+    view.setBigUint64(0, fileId, false);
+    view.setBigUint64(8, BigInt(position), false);
+    bytes.set(root, 16);
+    view.setBigUint64(16 + Slot.LENGTH, commitId, false);
+    return crc64(bytes);
+  }
+
+  toBytes(): Uint8Array {
+    const buffer = new Uint8Array(RootTrailer.LENGTH);
+    buffer.set(this.root.toBytes(), 0);
+    const view = new DataView(buffer.buffer);
+    view.setBigUint64(Slot.LENGTH, this.commitId, false);
+    view.setBigUint64(Slot.LENGTH + 8, this.checksum, false);
+    return buffer;
+  }
+}
+
+// what a streaming replica sends its source, so the source knows which
+// bytes to send back (see `Database.replicationStart`)
+export interface ReplicaState {
+  committedSize: number;
+  // the checksum of the trailer that ends the committed bytes. it covers the
+  // file ID and the commit's random ID, so it identifies both the file and the
+  // history that led to the commit.
+  checksum: bigint;
+}
+
+/** what `Database.openReplicated` returns: give it the bytes, then close it to commit them */
+export interface ReplicaWriter {
+  write(chunk: Uint8Array): void;
+  close(): void;
+}
+
 // BTreeHeader: a root pointer plus the element count (backs LinkedArrayList)
 export class BTreeHeader {
   static readonly LENGTH = 16;
@@ -215,6 +331,65 @@ export class KeyValuePair {
     const valueSlotBytes = bytes.slice(hashSize + Slot.LENGTH, hashSize + Slot.LENGTH * 2);
     const valueSlot = Slot.fromBytes(valueSlotBytes);
     return new KeyValuePair(valueSlot, keySlot, hash);
+  }
+}
+
+// a KeyValuePair without the hash, which sorted maps don't need. sorted map
+// entries written by version 0 databases are KeyValuePairs anyway.
+export class SortedKeyValuePair {
+  static readonly LENGTH = Slot.LENGTH * 2;
+
+  constructor(public valueSlot: Slot, public keySlot: Slot) {}
+
+  toBytes(): Uint8Array {
+    const buffer = new Uint8Array(SortedKeyValuePair.LENGTH);
+    buffer.set(this.keySlot.toBytes(), 0);
+    buffer.set(this.valueSlot.toBytes(), Slot.LENGTH);
+    return buffer;
+  }
+
+  static fromBytes(bytes: Uint8Array): SortedKeyValuePair {
+    const keySlot = Slot.fromBytes(bytes.slice(0, Slot.LENGTH));
+    const valueSlot = Slot.fromBytes(bytes.slice(Slot.LENGTH, Slot.LENGTH * 2));
+    return new SortedKeyValuePair(valueSlot, keySlot);
+  }
+}
+
+// where the key slot is in a .kv_pair or .sorted_kv_pair entry. the value slot follows it.
+export function kvKeyOffset(tag: Tag, hashSize: number): number {
+  return tag === Tag.KV_PAIR ? hashSize : 0;
+}
+
+// decodes a .kv_pair or .sorted_kv_pair entry. a .sorted_kv_pair has no hash, so it is 0.
+export function decodeKvPair(reader: DataReader, tag: Tag, hashSize: number): KeyValuePair {
+  switch (tag) {
+    case Tag.KV_PAIR: {
+      const bytes = new Uint8Array(KeyValuePair.length(hashSize));
+      reader.readFully(bytes);
+      return KeyValuePair.fromBytes(bytes, hashSize);
+    }
+    case Tag.SORTED_KV_PAIR: {
+      const bytes = new Uint8Array(SortedKeyValuePair.LENGTH);
+      reader.readFully(bytes);
+      const pair = SortedKeyValuePair.fromBytes(bytes);
+      return new KeyValuePair(pair.valueSlot, pair.keySlot, new Uint8Array(hashSize));
+    }
+    default:
+      throw new UnexpectedTagException();
+  }
+}
+
+// encodes a .kv_pair or .sorted_kv_pair entry. a .sorted_kv_pair leaves out the hash.
+export function encodeKvPair(writer: DataWriter, tag: Tag, kvPair: KeyValuePair): void {
+  switch (tag) {
+    case Tag.KV_PAIR:
+      writer.write(kvPair.toBytes());
+      break;
+    case Tag.SORTED_KV_PAIR:
+      writer.write(new SortedKeyValuePair(kvPair.valueSlot, kvPair.keySlot).toBytes());
+      break;
+    default:
+      throw new UnreachableException();
   }
 }
 
@@ -273,10 +448,10 @@ export class BTreeSplitResult {
 
 // sorted_map / sorted_set: a count-augmented B+tree keyed on arbitrary byte strings,
 // ordered lexicographically. reuses the b-tree's capacity constants, persistence model
-// (txStart reuse), KeyValuePair entries, and the BTreeHeader {rootPtr, size} header. a
-// leaf holds .kv_pair entries in ascending key order; a branch holds child slots,
-// separator slots (the smallest key in each child's subtree; separators[0] is an unused
-// sentinel), and per-child subtree counts.
+// (txStart reuse), and the BTreeHeader {rootPtr, size} header. a leaf holds
+// .sorted_kv_pair entries (.kv_pair for entries written by version 0) in ascending key
+// order; a branch holds child slots, separator slots (the smallest key in each child's
+// subtree; separators[0] is an unused sentinel), and per-child subtree counts.
 export class SortedNode {
   entries: Slot[] = new Array(BTREE_SLOT_COUNT); // leaf
   children: Slot[] = new Array(BTREE_SLOT_COUNT); // branch
@@ -304,13 +479,13 @@ export class SortedSplit {
   constructor(public nodePtr: number, public count: number, public separator: Slot) {}
 }
 
-// insert/replace result: where to write the value, whether a new entry was added (vs
-// replacing), and the new right sibling if this node split
+// insert/replace result: the entry whose value to write, whether a new entry was added
+// (vs replacing), and the new right sibling if this node split
 export class SortedInsertResult {
   constructor(
     public nodePtr: number,
     public count: number,
-    public valuePosition: number,
+    public kvSlot: Slot,
     public added: boolean,
     public split: SortedSplit | null
   ) {}
@@ -328,7 +503,7 @@ export class SortedSlot {
 }
 
 export class SortedEntry {
-  constructor(public kvSlot: Slot, public keySlot: Slot, public valuePosition: number) {}
+  constructor(public kvSlot: Slot, public keySlot: Slot) {}
 }
 
 // PathPart types (discriminated union)
@@ -463,25 +638,22 @@ export class ArrayListInit implements PathPartBase {
 
         let arrayListStart = Number(slotPtr.slot.value);
 
-        if (db.txStart !== null) {
-          if (arrayListStart < db.txStart) {
-            db.core.seek(arrayListStart);
-            const headerBytes = new Uint8Array(ArrayListHeader.LENGTH);
-            reader.readFully(headerBytes);
-            const header = ArrayListHeader.fromBytes(headerBytes);
-            db.core.seek(header.ptr);
-            const arrayListIndexBlock = new Uint8Array(INDEX_BLOCK_SIZE);
-            reader.readFully(arrayListIndexBlock);
+        // copy it to the end unless it was made in this transaction
+        if (db.isOld(arrayListStart)) {
+          db.core.seek(arrayListStart);
+          const headerBytes = new Uint8Array(ArrayListHeader.LENGTH);
+          reader.readFully(headerBytes);
+          const header = ArrayListHeader.fromBytes(headerBytes);
+          db.core.seek(header.ptr);
+          const arrayListIndexBlock = new Uint8Array(INDEX_BLOCK_SIZE);
+          reader.readFully(arrayListIndexBlock);
 
-            arrayListStart = db.core.length();
-            db.core.seek(arrayListStart);
-            const nextArrayListPtr = arrayListStart + ArrayListHeader.LENGTH;
-            const newHeader = header.withPtr(nextArrayListPtr);
-            writer.write(newHeader.toBytes());
-            writer.write(arrayListIndexBlock);
-          }
-        } else if (db.header.tag === Tag.ARRAY_LIST) {
-          throw new ExpectedTxStartException();
+          arrayListStart = db.core.length();
+          db.core.seek(arrayListStart);
+          const nextArrayListPtr = arrayListStart + ArrayListHeader.LENGTH;
+          const newHeader = header.withPtr(nextArrayListPtr);
+          writer.write(newHeader.toBytes());
+          writer.write(arrayListIndexBlock);
         }
 
         const nextSlotPtr = new SlotPointer(position, new Slot(arrayListStart, Tag.ARRAY_LIST));
@@ -573,7 +745,9 @@ export class ArrayListAppend implements PathPartBase {
       db.core.seek(nextArrayListStart);
       writer.write(appendResult.header.toBytes());
     }
-    if (isTopLevel && db.transaction !== null) {
+    // the appended slot is the transaction's root slot when this is the top-level
+    // list (in streaming mode, the list held by the transaction's copy of the root)
+    if (db.transaction !== null && (isTopLevel || slotPtr.position === db.transaction.scratchPosition)) {
       db.transaction.rootPosition = appendResult.slotPtr.position;
     }
     const finalSlotPtr = db.readSlotPointer(writeMode, path, pathI + 1, appendResult.slotPtr);
@@ -675,18 +849,14 @@ export class LinkedArrayListInit implements PathPartBase {
         // moments still pointing at the old header are unaffected. b-tree nodes are
         // always appended, so only the header (updated in place by later operations
         // in this tx) needs copying.
-        if (db.txStart !== null) {
-          if (headerPtr < db.txStart) {
-            const reader = db.core.reader();
-            db.core.seek(headerPtr);
-            const headerBytes = new Uint8Array(BTreeHeader.LENGTH);
-            reader.readFully(headerBytes);
-            headerPtr = db.core.length();
-            db.core.seek(headerPtr);
-            writer.write(headerBytes);
-          }
-        } else if (db.header.tag === Tag.ARRAY_LIST) {
-          throw new ExpectedTxStartException();
+        if (db.isOld(headerPtr)) {
+          const reader = db.core.reader();
+          db.core.seek(headerPtr);
+          const headerBytes = new Uint8Array(BTreeHeader.LENGTH);
+          reader.readFully(headerBytes);
+          headerPtr = db.core.length();
+          db.core.seek(headerPtr);
+          writer.write(headerBytes);
         }
         const nextSlotPtr = new SlotPointer(position, new Slot(headerPtr, Tag.LINKED_ARRAY_LIST));
         db.core.seek(position);
@@ -1070,25 +1240,22 @@ export class HashMapInit implements PathPartBase {
 
         let mapStart = Number(slotPtr.slot.value);
 
-        if (db.txStart !== null) {
-          if (mapStart < db.txStart) {
-            db.core.seek(mapStart);
-            let mapCountMaybe: number | null = null;
-            if (this.counted) {
-              mapCountMaybe = reader.readLong();
-            }
-            const mapIndexBlock = new Uint8Array(INDEX_BLOCK_SIZE);
-            reader.readFully(mapIndexBlock);
-
-            mapStart = db.core.length();
-            db.core.seek(mapStart);
-            if (mapCountMaybe !== null) {
-              writer.writeLong(mapCountMaybe);
-            }
-            writer.write(mapIndexBlock);
+        // copy it to the end unless it was made in this transaction
+        if (db.isOld(mapStart)) {
+          db.core.seek(mapStart);
+          let mapCountMaybe: number | null = null;
+          if (this.counted) {
+            mapCountMaybe = reader.readLong();
           }
-        } else if (db.header.tag === Tag.ARRAY_LIST) {
-          throw new ExpectedTxStartException();
+          const mapIndexBlock = new Uint8Array(INDEX_BLOCK_SIZE);
+          reader.readFully(mapIndexBlock);
+
+          mapStart = db.core.length();
+          db.core.seek(mapStart);
+          if (mapCountMaybe !== null) {
+            writer.writeLong(mapCountMaybe);
+          }
+          writer.write(mapIndexBlock);
         }
 
         const nextSlotPtr = new SlotPointer(position, new Slot(mapStart, tag));
@@ -1240,18 +1407,14 @@ export class SortedMapInit implements PathPartBase {
         if (slotPtr.slot.tag !== tag) throw new UnexpectedTagException();
         let headerPtr = Number(slotPtr.slot.value);
         // copy the header into this transaction unless it was made in it
-        if (db.txStart !== null) {
-          if (headerPtr < db.txStart) {
-            const reader = db.core.reader();
-            db.core.seek(headerPtr);
-            const headerBytes = new Uint8Array(BTreeHeader.LENGTH);
-            reader.readFully(headerBytes);
-            headerPtr = db.core.length();
-            db.core.seek(headerPtr);
-            writer.write(headerBytes);
-          }
-        } else if (db.header.tag === Tag.ARRAY_LIST) {
-          throw new ExpectedTxStartException();
+        if (db.isOld(headerPtr)) {
+          const reader = db.core.reader();
+          db.core.seek(headerPtr);
+          const headerBytes = new Uint8Array(BTreeHeader.LENGTH);
+          reader.readFully(headerBytes);
+          headerPtr = db.core.length();
+          db.core.seek(headerPtr);
+          writer.write(headerBytes);
         }
         const nextSlotPtr = new SlotPointer(position, new Slot(headerPtr, tag));
         db.core.seek(position);
@@ -1299,7 +1462,7 @@ export class SortedMapGet implements PathPartBase {
     if (writeMode === WriteMode.READ_ONLY) {
       const found = db.sortedGet(header.rootPtr, key);
       if (found === null) throw new KeyNotFoundException();
-      const targetSlot = db.sortedTargetSlot(Number(found.slot.value), this.target);
+      const targetSlot = db.sortedTargetSlot(found.slot, this.target);
       return db.readSlotPointer(writeMode, path, pathI + 1, targetSlot);
     } else {
       const result = db.sortedPut(header.rootPtr, key);
@@ -1312,8 +1475,7 @@ export class SortedMapGet implements PathPartBase {
       db.core.seek(headerPtr);
       writer.write(new BTreeHeader(newRootPtr, header.size + (result.added ? 1 : 0)).toBytes());
 
-      const kvPos = result.valuePosition - db.header.hashSize - Slot.LENGTH;
-      const targetSlot = db.sortedTargetSlot(kvPos, this.target);
+      const targetSlot = db.sortedTargetSlot(result.kvSlot, this.target);
       return db.readSlotPointer(writeMode, path, pathI + 1, targetSlot);
     }
   }
@@ -1357,7 +1519,7 @@ export class SortedMapGetIndex implements PathPartBase {
     const rank = index < 0 ? header.size - Math.abs(index) : index;
 
     const found = db.sortedGetByIndex(header.rootPtr, rank);
-    // return the kv_pair entry so the caller can read key and value
+    // return the entry so the caller can read key and value
     const targetSlot = new SlotPointer(found.position, found.slot);
     return db.readSlotPointer(writeMode, path, pathI + 1, targetSlot);
   }
@@ -1543,8 +1705,21 @@ function bigIntShiftRight(value: Uint8Array, bits: number): bigint {
 
 export class Transaction {
   aborted = false;
+  // the slot that holds the transaction's root, which remains writable after a freeze
   rootPosition: number | null = null;
+  // streaming mode only. the copy of the root slot that the transaction works on
+  scratchPosition: number | null = null;
   frozenAt: number | null = null;
+}
+
+// the size of the chunks that replication copies at a time
+const STREAM_CHUNK_SIZE = 64 * 1024;
+
+// for file IDs and commit IDs
+function randomU64(): bigint {
+  const bytes = new Uint8Array(8);
+  globalThis.crypto.getRandomValues(bytes);
+  return new DataView(bytes.buffer).getBigUint64(0, false);
 }
 
 // Database class
@@ -1554,19 +1729,34 @@ export class Database {
   public header!: Header;
   public txStart: number | null = null;
   public transaction: Transaction | null = null;
+  // streaming mode only. see `ROOT_HEADER_START`.
+  public fileId: bigint = 0n;
 
-  constructor(core: Core, hasher: Hasher) {
+  // `fileId` is the file ID of a new database. if null, a random one is used.
+  constructor(core: Core, hasher: Hasher, fileId: bigint | null = null) {
     this.core = core;
     this.hasher = hasher;
 
     core.seek(0);
     if ((core.length()) === 0) {
+      // new databases are always written with the newest version
       this.header = new Header(hasher.id, hasher.digestLength, VERSION, Tag.NONE, MAGIC_NUMBER);
+      this.fileId = fileId ?? randomU64();
       this.header.write(core);
-      core.flush();
+      const fileIdBytes = new Uint8Array(8);
+      new DataView(fileIdBytes.buffer).setBigUint64(0, this.fileId, false);
+      core.writer().write(fileIdBytes);
+      // write the root header and commit an empty root, so the
+      // file ends with a trailer like after any transaction
+      core.writer().write(new RootHeader(0, new Slot()).toBytes());
+      // the first commit's ID is 0, so a new database's bytes only
+      // depend on its file ID
+      this.commitRoot(new Slot(), 0n);
+      core.sync();
     } else {
       this.header = this.readAndValidateHeader();
-      this.validateCommittedSize();
+      if (this.header.streaming()) this.fileId = this.readFileId();
+      this.committedSize();
     }
   }
 
@@ -1582,19 +1772,42 @@ export class Database {
 
   // the root tag only changes once, when the top-level data is initialized.
   // if we haven't seen that happen, another instance may have done it since
-  // we read the header.
+  // we read the header. (in streaming mode the root tag stays NONE.)
   refreshHeader(): void {
-    if (this.header.tag === Tag.NONE) {
+    if (!this.header.streaming() && this.header.tag === Tag.NONE) {
       this.header = this.readAndValidateHeader();
     }
   }
 
   rootCursor(): WriteCursor {
+    // in streaming mode, the cursor only holds a snapshot of the root
+    // slot, and every operation that starts at it reads the root again.
+    // if this read fails, the cursor looks empty and the next operation
+    // throws the error.
+    if (this.header.streaming()) {
+      let root: Slot;
+      try {
+        root = this.readRootSlot();
+      } catch {
+        root = new Slot();
+      }
+      return new WriteCursor(new SlotPointer(ROOT_HEADER_START, root), this);
+    }
     this.refreshHeader();
     return new WriteCursor(
       new SlotPointer(null, new Slot(Header.LENGTH, this.header.tag)),
       this
     );
+  }
+
+  /**
+   * runs `fn(cursor)` with a write cursor to the root in a single transaction,
+   * discarding everything it wrote if it throws. use it to group writes to a
+   * root that isn't an array list, such as a hash map. for an array list root,
+   * `appendContext` does the same.
+   */
+  runContext(fn: ContextFunction): void {
+    this.rootCursor().writePath([new Context(fn)]);
   }
 
   freeze(): void {
@@ -1605,67 +1818,217 @@ export class Database {
     active.frozenAt = this.txStart;
   }
 
-  /** clears and borrows the supplied offsets map without disposing it. */
+  /** streaming mode only. this database's `ReplicaState`. */
+  replicaState(): ReplicaState {
+    if (!this.header.streaming()) throw new StreamingModeRequiredException();
+    const committedSize = this.committedSize();
+    return { committedSize, checksum: this.readRootTrailer(committedSize).checksum };
+  }
+
+  /**
+   * streaming mode only. where to start sending committed bytes to a replica
+   * in `state`. that's its committed size if its bytes are a prefix of this
+   * database, or 0 if it must be replaced, because it's a replica of another
+   * file or it has diverged from this one.
+   */
+  replicationStart(state: ReplicaState): number {
+    if (!this.header.streaming()) throw new StreamingModeRequiredException();
+    if (state.committedSize > this.committedSize()) return 0;
+    let trailer: RootTrailer;
+    try {
+      trailer = this.readRootTrailer(state.committedSize);
+    } catch (e) {
+      if (e instanceof InvalidDatabaseException) return 0;
+      throw e;
+    }
+    return trailer.checksum === state.checksum ? state.committedSize : 0;
+  }
+
+  /**
+   * streaming mode only. writes the committed bytes from `start` up to
+   * `end` to `writer`. `start` is usually from `replicationStart`, and `end`
+   * can't be past `committedSize`. committed bytes never change except for
+   * the root header, so when `start` is 0, a root header matching `end` is
+   * written, making the bytes a complete database by themselves.
+   */
+  readCommitted(start: number, end: number, writer: Pick<DataWriter, 'write'>): void {
+    if (!this.header.streaming()) throw new StreamingModeRequiredException();
+    if (start < 0 || start > end || end > this.committedSize()) throw new InvalidRangeException();
+    if (start > 0 && start < ROOT_HEADER_END) throw new InvalidRangeException();
+    if (start === 0) {
+      const trailer = this.readRootTrailer(end);
+      this.streamTo(writer, 0, ROOT_HEADER_START);
+      writer.write(new RootHeader(end, trailer.root).toBytes());
+      this.streamTo(writer, ROOT_HEADER_END, end - ROOT_HEADER_END);
+    } else {
+      this.streamTo(writer, start, end - start);
+    }
+  }
+
+  /**
+   * streaming mode only. writes `len` bytes from `reader` at `start` and
+   * commits them. they must be the bytes from `readCommitted`, so they end
+   * with a trailer. when `start` is 0, this database is replaced by them;
+   * otherwise `start` must be this database's `committedSize`.
+   */
+  applyReplicated(start: number, reader: Pick<DataReader, 'readFully'>, len: number): void {
+    const writer = this.openReplicated(start, len);
+    let remaining = len;
+    while (remaining > 0) {
+      const chunk = new Uint8Array(Math.min(remaining, STREAM_CHUNK_SIZE));
+      reader.readFully(chunk);
+      writer.write(chunk);
+      remaining -= chunk.length;
+    }
+    writer.close();
+  }
+
+  /**
+   * streaming mode only. like `applyReplicated`, but returns a writer to give
+   * the `len` bytes to as they arrive, for example from an async network stream.
+   * they are written to this database right away, and `close` commits them. if
+   * fewer than `len` bytes were written, or they don't end with a trailer,
+   * `close` throws and the database stays at its last commit. when `start` is
+   * 0, this database is truncated now and replaced by the bytes.
+   */
+  openReplicated(start: number, len: number): ReplicaWriter {
+    if (!this.header.streaming()) throw new StreamingModeRequiredException();
+    if (len < 0) throw new InvalidRangeException();
+    if (start === 0) {
+      this.core.setLength(0);
+    } else if (start === this.committedSize()) {
+      // discard anything past the committed bytes, such as the remains of an interrupted sync
+      this.truncate();
+    } else {
+      throw new InvalidRangeException();
+    }
+
+    let written = 0;
+    let closed = false;
+    return {
+      write: (chunk: Uint8Array): void => {
+        if (closed) throw new Error('replica writer is closed');
+        if (chunk.length > len - written) throw new InvalidRangeException();
+        this.core.seek(start + written);
+        this.core.writer().write(chunk);
+        written += chunk.length;
+      },
+      close: (): void => {
+        if (closed) return;
+        closed = true;
+        if (written !== len) throw new EndOfStreamException();
+        this.commitReplicated(start, len);
+      },
+    };
+  }
+
+  // commits `len` bytes written at `start` by a replica writer
+  private commitReplicated(start: number, len: number): void {
+    if (start === 0) {
+      // the bytes are a different database, with its own header and file ID
+      this.core.sync();
+      const header = this.readAndValidateHeader();
+      if (!header.streaming()) throw new InvalidDatabaseException();
+      this.header = header;
+      this.fileId = this.readFileId();
+      this.committedSize();
+    } else if (len > 0) {
+      // the bytes must end with a trailer. update the root header to match it.
+      const trailer = this.readRootTrailer(start + len);
+      this.core.sync();
+      this.writeRootHeader(trailer.root);
+      this.core.sync();
+    }
+  }
+
+  // writes the `len` bytes at `position` to `writer`
+  private streamTo(writer: Pick<DataWriter, 'write'>, position: number, len: number): void {
+    let remaining = len;
+    while (remaining > 0) {
+      const chunk = new Uint8Array(Math.min(remaining, STREAM_CHUNK_SIZE));
+      this.core.seek(position + len - remaining);
+      this.core.reader().readFully(chunk);
+      writer.write(chunk);
+      remaining -= chunk.length;
+    }
+  }
+
+  /**
+   * clears and borrows the supplied offsets map without disposing it.
+   *
+   * the target must be a new or empty database, or this throws
+   * `TargetNotEmptyException`. it is always written with the newest version,
+   * so this is also how a version 0 database is migrated.
+   */
   compact(targetCore: Core, offsetMap: OffsetMap = new Map<number, number>()): Database {
     // cached offsets only apply to this compaction's target
     offsetMap.clear();
     const hasher = new Hasher(this.hasher.algorithm, this.header.hashId);
     const target = new Database(targetCore, hasher);
 
-    if (this.header.tag === Tag.NONE) {
-      targetCore.sync();
-      return target;
-    }
-    if (this.header.tag !== Tag.ARRAY_LIST) throw new UnexpectedTagException();
+    // the target must be a new or empty database, because compaction
+    // writes to it with ordinary transactions. this also rejects
+    // compacting a database into its own file.
+    if (!target.header.streaming() || !target.readRootSlot().empty()) throw new TargetNotEmptyException();
 
-    // read source's top-level ArrayListHeader
-    this.core.seek(Header.LENGTH);
-    const sourceReader = this.core.reader();
-    const headerBytes = new Uint8Array(ArrayListHeader.LENGTH);
-    sourceReader.readFully(headerBytes);
-    const sourceHeader = ArrayListHeader.fromBytes(headerBytes);
+    // in streaming mode, the root slot carries the type of the top-level data
+    const sourceRoot = this.header.streaming()
+      ? this.readRootSlot()
+      : new Slot(Header.LENGTH, this.header.tag);
 
-    if (sourceHeader.size === 0) {
-      targetCore.sync();
-      return target;
-    }
+    // an empty root compacts to a new database. a root explicitly
+    // set to null isn't empty, so it is remapped below.
+    if (sourceRoot.empty()) return target;
 
-    // read the last moment's slot
-    const lastKey = sourceHeader.size - 1;
-    const shift = lastKey < SLOT_COUNT ? 0 : Math.floor(Math.log(lastKey) / Math.log(SLOT_COUNT));
-    const lastSlotPtr = this.readArrayListSlot(sourceHeader.ptr, lastKey, shift, WriteMode.READ_ONLY, true);
-    const momentSlot = lastSlotPtr.slot;
-
-    // write TopLevelArrayListHeader + root index block to target
-    const targetWriter = targetCore.writer();
-    targetCore.seek(Header.LENGTH);
-    const targetArrayListPtr = Header.LENGTH + TopLevelArrayListHeader.LENGTH;
-    targetWriter.write(
-      new TopLevelArrayListHeader(0, new ArrayListHeader(targetArrayListPtr, 1)).toBytes()
-    );
-    targetWriter.write(new Uint8Array(INDEX_BLOCK_SIZE));
-
-    // recursively remap the moment slot
+    // the target is written as one ordinary transaction, so it is committed
+    // and fsynced like any other (callers typically rename it over an
+    // existing database file). the remap must run inside the transaction,
+    // because starting one truncates the target.
     const compactor = new Compactor(this.core, targetCore, this.header.hashSize, offsetMap);
-    const remappedMoment = compactor.remapSlot(momentSlot);
+    const remap = (slot: Slot): ContextFunction => (cursor: WriteCursor) => {
+      cursor.write(compactor.remapSlot(slot));
+    };
 
-    // write remapped moment slot into position 0 of target's root index block
-    targetCore.seek(targetArrayListPtr);
-    targetWriter.write(remappedMoment.toBytes());
-
-    // update target's DatabaseHeader tag
-    target.header = target.header.withTag(Tag.ARRAY_LIST);
-    targetCore.seek(0);
-    target.header.write(targetCore);
-
-    // fsync so the compacted database is durable, since callers
-    // typically rename it over an existing database file
-    target.updateCommittedSize();
+    switch (sourceRoot.tag) {
+      // an array list root is a history, and its latest moment
+      // becomes the only moment of a new one
+      case Tag.ARRAY_LIST: {
+        const lastMoment = this.rootCursor().readPathSlot([new ArrayListGet(-1)]);
+        if (lastMoment !== null) {
+          target.rootCursor().writePath([
+            new ArrayListInit(),
+            new ArrayListAppend(),
+            new Context(remap(lastMoment)),
+          ]);
+        }
+        break;
+      }
+      // any other root is remapped whole. this is also how a version 0
+      // database with a top-level hash map is migrated.
+      default:
+        target.runContext(remap(sourceRoot));
+    }
 
     return target;
   }
 
-  private validateCommittedSize(): number {
+  /**
+   * the number of bytes that belong to committed transactions. in streaming
+   * mode, they never change except for the root header (see `readCommitted`).
+   */
+  committedSize(): number {
+    if (this.header.streaming()) {
+      const header = this.readRootHeader();
+      const minimumSize = ROOT_HEADER_END + RootTrailer.LENGTH;
+      if (header.fileSize < minimumSize) throw new InvalidDatabaseException();
+      if (this.core.length() < header.fileSize) throw new TruncatedDatabaseException();
+      // the committed bytes must end with a trailer matching the header
+      if (!this.readRootTrailer(header.fileSize).root.equals(header.root)) {
+        throw new InvalidDatabaseException();
+      }
+      return header.fileSize;
+    }
+
     if (this.header.tag !== Tag.ARRAY_LIST) return this.core.length();
 
     this.core.seek(Header.LENGTH);
@@ -1688,19 +2051,28 @@ export class Database {
     const fileSize = this.core.length();
 
     if (fileSize < committedSize) throw new TruncatedDatabaseException();
+
     return committedSize;
   }
 
   truncate(): void {
-    let committedSize = this.validateCommittedSize();
+    let committedSize = this.committedSize();
     const active = this.transaction;
     if (active !== null && active.frozenAt !== null && active.frozenAt > committedSize) {
       // retain frozen bytes without publishing the failed transaction
-      this.core.sync();
-      this.core.seek(Header.LENGTH + ArrayListHeader.LENGTH);
-      this.core.writer().writeLong(active.frozenAt);
-      this.core.sync();
-      committedSize = active.frozenAt;
+      if (this.header.streaming()) {
+        // end them with a trailer for the root that is already committed
+        if (this.core.length() > active.frozenAt) this.core.setLength(active.frozenAt);
+        this.commitRoot(this.readRootSlot(), randomU64());
+        this.core.sync();
+        committedSize = this.core.length();
+      } else {
+        this.core.sync();
+        this.core.seek(Header.LENGTH + ArrayListHeader.LENGTH);
+        this.core.writer().writeLong(active.frozenAt);
+        this.core.sync();
+        committedSize = active.frozenAt;
+      }
     }
     if (this.core.length() > committedSize) {
       this.core.setLength(committedSize);
@@ -1718,6 +2090,146 @@ export class Database {
       this.core.writer().writeLong(fileSize);
       this.core.sync();
     }
+  }
+
+  // streaming mode only
+  private readFileId(): bigint {
+    this.core.seek(Header.LENGTH);
+    const bytes = new Uint8Array(8);
+    this.core.reader().readFully(bytes);
+    return new DataView(bytes.buffer).getBigUint64(0, false);
+  }
+
+  // streaming mode only
+  readRootHeader(): RootHeader {
+    this.core.seek(ROOT_HEADER_START);
+    const bytes = new Uint8Array(RootHeader.LENGTH);
+    this.core.reader().readFully(bytes);
+    return RootHeader.fromBytes(bytes);
+  }
+
+  // streaming mode only. the most recently committed root slot.
+  readRootSlot(): Slot {
+    return this.readRootHeader().root;
+  }
+
+  // streaming mode only. the trailer that ends at `end`.
+  private readRootTrailer(end: number): RootTrailer {
+    if (end < RootTrailer.LENGTH) throw new InvalidDatabaseException();
+    const trailerPos = end - RootTrailer.LENGTH;
+    this.core.seek(trailerPos);
+    const bytes = new Uint8Array(RootTrailer.LENGTH);
+    this.core.reader().readFully(bytes);
+    const rootBytes = bytes.subarray(0, Slot.LENGTH);
+    const view = new DataView(bytes.buffer);
+    const commitId = view.getBigUint64(Slot.LENGTH, false);
+    const checksum = view.getBigUint64(Slot.LENGTH + 8, false);
+    if (checksum !== RootTrailer.computeChecksum(this.fileId, trailerPos, rootBytes, commitId)) throw new InvalidDatabaseException();
+    return new RootTrailer(checksum, commitId, Slot.fromBytes(rootBytes));
+  }
+
+  // streaming mode only. completes a transaction by appending a trailer
+  // for `root` and updating the root header. callers must sync afterwards
+  // to make the header itself durable.
+  private commitRoot(root: Slot, commitId: bigint): void {
+    const trailerPos = this.core.length();
+    this.core.seek(trailerPos);
+    this.core.writer().write(RootTrailer.init(this.fileId, trailerPos, root, commitId).toBytes());
+
+    // flush and fsync before updating the header, because updating
+    // the header is what completes the transaction. without the
+    // fsync, the OS could persist the header before the data it
+    // points to, so a crash could commit a transaction whose data
+    // never reached disk.
+    this.core.sync();
+
+    this.writeRootHeader(root);
+  }
+
+  // streaming mode only. points the root header at `root`, which must be
+  // in the trailer that ends the file.
+  private writeRootHeader(root: Slot): void {
+    const fileSize = this.core.length();
+    this.core.seek(ROOT_HEADER_START);
+    this.core.writer().write(new RootHeader(fileSize, root).toBytes());
+  }
+
+  // whether this slot pointer is the root of the database
+  isRoot(slotPtr: SlotPointer): boolean {
+    if (this.header.streaming()) return slotPtr.position === ROOT_HEADER_START;
+    return slotPtr.position === null && slotPtr.slot.value === BigInt(Header.LENGTH);
+  }
+
+  // whether writes must happen inside a transaction. in version 0 databases,
+  // only an array list root needs them; otherwise no moment can reference
+  // the data, so it is all mutable in place.
+  transactional(): boolean {
+    return this.header.streaming() || this.header.tag === Tag.ARRAY_LIST;
+  }
+
+  // the collection tag that an init path part creates, if any
+  private static initTag(part: PathPart): Tag | null {
+    switch (part.kind) {
+      case 'ArrayListInit':
+        return Tag.ARRAY_LIST;
+      case 'LinkedArrayListInit':
+        return Tag.LINKED_ARRAY_LIST;
+      case 'HashMapInit':
+        return part.counted
+          ? (part.set ? Tag.COUNTED_HASH_SET : Tag.COUNTED_HASH_MAP)
+          : (part.set ? Tag.HASH_SET : Tag.HASH_MAP);
+      case 'SortedMapInit':
+        return part.set ? Tag.SORTED_SET : Tag.SORTED_MAP;
+      default:
+        return null;
+    }
+  }
+
+  // the init path part for a collection tag, if any
+  private static initPartFor(tag: Tag): PathPart | null {
+    switch (tag) {
+      case Tag.ARRAY_LIST:
+        return new ArrayListInit();
+      case Tag.LINKED_ARRAY_LIST:
+        return new LinkedArrayListInit();
+      case Tag.HASH_MAP:
+        return new HashMapInit(false, false);
+      case Tag.HASH_SET:
+        return new HashMapInit(false, true);
+      case Tag.COUNTED_HASH_MAP:
+        return new HashMapInit(true, false);
+      case Tag.COUNTED_HASH_SET:
+        return new HashMapInit(true, true);
+      case Tag.SORTED_MAP:
+        return new SortedMapInit(false);
+      case Tag.SORTED_SET:
+        return new SortedMapInit(true);
+      default:
+        return null;
+    }
+  }
+
+  // whether the data at `ptr` predates this transaction, so it must be
+  // copied before it is modified. outside a transaction nothing is old,
+  // but a transactional database can't be written outside one.
+  isOld(ptr: number): boolean {
+    if (this.txStart === null) {
+      if (this.transactional()) throw new ExpectedTxStartException();
+      return false;
+    }
+    return ptr < this.txStart;
+  }
+
+  // copies an index block to the end unless it was made in this transaction
+  copyIndexBlockIfOld(ptr: number): number {
+    if (!this.isOld(ptr)) return ptr;
+    const indexBlock = new Uint8Array(INDEX_BLOCK_SIZE);
+    this.core.seek(ptr);
+    this.core.reader().readFully(indexBlock);
+    const nextPtr = this.core.length();
+    this.core.seek(nextPtr);
+    this.core.writer().write(indexBlock);
+    return nextPtr;
   }
 
   checkHashBytes(hash: Uint8Array): Uint8Array {
@@ -1762,9 +2274,76 @@ export class Database {
       return slotPtr;
     }
 
+    // in streaming mode, every write that starts at the root is a transaction
+    if (this.header.streaming() && this.isRoot(slotPtr)) {
+      const root = this.readRootSlot();
+
+      // the position of a read path doesn't matter, but it must not be
+      // ROOT_HEADER_START or this would recurse forever
+      if (writeMode === WriteMode.READ_ONLY) {
+        return this.readSlotPointer(writeMode, path, pathI, new SlotPointer(null, root));
+      }
+
+      // initializing an initialized root is free, so a wrapper like
+      // `WriteArrayList` can hold a root cursor without a transaction. like
+      // starting one, it discards data left by an unfinished transaction.
+      // (`writePath` rejects root writes inside a transaction, so none
+      // is open here.)
+      if (path.length - pathI === 1 && root.tag !== Tag.NONE) {
+        const tag = Database.initTag(path[pathI]);
+        if (tag !== null && tag === root.tag) {
+          this.truncate();
+          return new SlotPointer(ROOT_HEADER_START, root);
+        }
+      }
+
+      // discard data left by an unfinished transaction after a crash
+      this.truncate();
+      const scratchPos = this.core.length();
+      this.txStart = scratchPos;
+      try {
+        // the transaction works on a copy of the root slot
+        this.core.seek(scratchPos);
+        this.core.writer().write(root.toBytes());
+        let rootPtr = new SlotPointer(scratchPos, root);
+        if (this.transaction !== null) {
+          this.transaction.rootPosition = scratchPos;
+          this.transaction.scratchPosition = scratchPos;
+        }
+
+        // every collection expects its init part to copy its header or root
+        // block into the transaction before anything writes to it. the root
+        // has no enclosing init part, so run one here.
+        const initPart = Database.initPartFor(root.tag);
+        if (initPart !== null) {
+          rootPtr = this.readSlotPointer(writeMode, [initPart], 0, rootPtr);
+        }
+
+        let result = this.readSlotPointer(writeMode, path, pathI, rootPtr);
+
+        // the copy now holds the new root, so commit it
+        this.core.seek(scratchPos);
+        const nextRootBytes = new Uint8Array(Slot.LENGTH);
+        this.core.reader().readFully(nextRootBytes);
+        const nextRoot = Slot.fromBytes(nextRootBytes);
+        this.commitRoot(nextRoot, randomU64());
+
+        // a path that ends at the root (such as an init or a write) returns
+        // a root cursor, so it can be used for later transactions
+        if (result.position === scratchPos) {
+          result = new SlotPointer(ROOT_HEADER_START, nextRoot);
+        }
+        return result;
+      } finally {
+        this.txStart = null;
+      }
+    }
+
     if (writeMode === WriteMode.READ_WRITE) this.checkFrozenSlot(slotPtr);
     const part = path[pathI];
-    const isTopLevel = slotPtr.position === null && slotPtr.slot.value === BigInt(Header.LENGTH);
+    // in streaming mode the root is handled above, so the
+    // top-level special cases below only apply to version 0
+    const isTopLevel = !this.header.streaming() && this.isRoot(slotPtr);
 
     const isTxStart = writeMode === WriteMode.READ_WRITE && isTopLevel && this.header.tag === Tag.ARRAY_LIST && this.txStart === null;
     if (isTxStart) {
@@ -1841,22 +2420,12 @@ export class Database {
       case Tag.INDEX: {
         let nextPtr = ptr;
         if (writeMode === WriteMode.READ_WRITE && !isTopLevel) {
-          if (this.txStart !== null) {
-            if (nextPtr < this.txStart) {
-              const writer = this.core.writer();
-              this.core.seek(ptr);
-              const indexBlock = new Uint8Array(INDEX_BLOCK_SIZE);
-              reader.readFully(indexBlock);
-
-              nextPtr = this.core.length();
-              this.core.seek(nextPtr);
-              writer.write(indexBlock);
-
-              this.core.seek(slotPos);
-              writer.write(new Slot(nextPtr, Tag.INDEX).toBytes());
-            }
-          } else if (this.header.tag === Tag.ARRAY_LIST) {
-            throw new ExpectedTxStartException();
+          nextPtr = this.copyIndexBlockIfOld(ptr);
+          if (nextPtr !== ptr) {
+            // make slot point to the copied block
+            const writer = this.core.writer();
+            this.core.seek(slotPos);
+            writer.write(new Slot(nextPtr, Tag.INDEX).toBytes());
           }
         }
         return this.readMapSlot(nextPtr, keyHash, keyOffset + 1, writeMode, isTopLevel, target);
@@ -1869,31 +2438,27 @@ export class Database {
 
         if (arraysEqual(kvPair.hash, keyHash)) {
           if (writeMode === WriteMode.READ_WRITE && !isTopLevel) {
-            if (this.txStart !== null) {
-              if (ptr < this.txStart) {
-                const writer = this.core.writer();
-                const hashPos = this.core.length();
-                this.core.seek(hashPos);
-                const keySlotPos = hashPos + this.header.hashSize;
-                const valueSlotPos = keySlotPos + Slot.LENGTH;
-                writer.write(kvPair.toBytes());
+            if (this.isOld(ptr)) {
+              const writer = this.core.writer();
+              const hashPos = this.core.length();
+              this.core.seek(hashPos);
+              const keySlotPos = hashPos + this.header.hashSize;
+              const valueSlotPos = keySlotPos + Slot.LENGTH;
+              writer.write(kvPair.toBytes());
 
-                const nextSlot = new Slot(hashPos, Tag.KV_PAIR);
-                this.core.seek(slotPos);
-                writer.write(nextSlot.toBytes());
+              const nextSlot = new Slot(hashPos, Tag.KV_PAIR);
+              this.core.seek(slotPos);
+              writer.write(nextSlot.toBytes());
 
-                let nextSlotPtr: SlotPointer;
-                if (target.kind === 'kv_pair') {
-                  nextSlotPtr = new SlotPointer(slotPos, nextSlot);
-                } else if (target.kind === 'key') {
-                  nextSlotPtr = new SlotPointer(keySlotPos, kvPair.keySlot);
-                } else {
-                  nextSlotPtr = new SlotPointer(valueSlotPos, kvPair.valueSlot);
-                }
-                return new HashMapGetResult(nextSlotPtr, false);
+              let nextSlotPtr: SlotPointer;
+              if (target.kind === 'kv_pair') {
+                nextSlotPtr = new SlotPointer(slotPos, nextSlot);
+              } else if (target.kind === 'key') {
+                nextSlotPtr = new SlotPointer(keySlotPos, kvPair.keySlot);
+              } else {
+                nextSlotPtr = new SlotPointer(valueSlotPos, kvPair.valueSlot);
               }
-            } else if (this.header.tag === Tag.ARRAY_LIST) {
-              throw new ExpectedTxStartException();
+              return new HashMapGetResult(nextSlotPtr, false);
             }
           }
 
@@ -2018,25 +2583,13 @@ export class Database {
       }
     }
 
-    if (!isTopLevel) {
-      if (this.txStart !== null) {
-        if (indexPos < this.txStart) {
-          const nextIndexPos = this.core.length();
-          this.core.seek(nextIndexPos);
-          writer.write(indexBlock);
-          const nextSlotPos = nextIndexPos + Slot.LENGTH * i;
-          this.core.seek(nextSlotPos);
-          writer.write(nextSlot.toBytes());
-          return new Slot(nextIndexPos, Tag.INDEX);
-        }
-      } else if (this.header.tag === Tag.ARRAY_LIST) {
-        throw new ExpectedTxStartException();
-      }
-    }
-
-    this.core.seek(slotPos);
+    // there was more than one used slot, or a single .index slot,
+    // so we must keep this index block. update the slot in it,
+    // copying the block first unless it belongs to this transaction.
+    const nextIndexPos = isTopLevel ? indexPos : this.copyIndexBlockIfOld(indexPos);
+    this.core.seek(nextIndexPos + Slot.LENGTH * i);
     writer.write(nextSlot.toBytes());
-    return new Slot(indexPos, Tag.INDEX);
+    return new Slot(nextIndexPos, Tag.INDEX);
   }
 
   // ArrayList methods
@@ -2121,22 +2674,12 @@ export class Database {
       case Tag.INDEX: {
         let nextPtr = ptr;
         if (writeMode === WriteMode.READ_WRITE && !isTopLevel) {
-          if (this.txStart !== null) {
-            if (nextPtr < this.txStart) {
-              this.core.seek(ptr);
-              const indexBlock = new Uint8Array(INDEX_BLOCK_SIZE);
-              reader.readFully(indexBlock);
-
-              const writer = this.core.writer();
-              nextPtr = this.core.length();
-              this.core.seek(nextPtr);
-              writer.write(indexBlock);
-
-              this.core.seek(slotPos);
-              writer.write(new Slot(nextPtr, Tag.INDEX).toBytes());
-            }
-          } else if (this.header.tag === Tag.ARRAY_LIST) {
-            throw new ExpectedTxStartException();
+          nextPtr = this.copyIndexBlockIfOld(ptr);
+          if (nextPtr !== ptr) {
+            // make slot point to the copied block
+            const writer = this.core.writer();
+            this.core.seek(slotPos);
+            writer.write(new Slot(nextPtr, Tag.INDEX).toBytes());
           }
         }
         return this.readArrayListSlot(nextPtr, key, shift - 1, writeMode, isTopLevel);
@@ -2171,14 +2714,8 @@ export class Database {
       }
       // the new root may still belong to a past moment. unlike child
       // nodes, root nodes are written directly, so copy it now.
-      if (!isTopLevel && this.txStart !== null && indexPos < this.txStart) {
-        const indexBlock = new Uint8Array(INDEX_BLOCK_SIZE);
-        this.core.seek(indexPos);
-        reader.readFully(indexBlock);
-        indexPos = this.core.length();
-        const writer = this.core.writer();
-        this.core.seek(indexPos);
-        writer.write(indexBlock);
+      if (!isTopLevel) {
+        indexPos = this.copyIndexBlockIfOld(indexPos);
       }
       return new ArrayListHeader(indexPos, size);
     }
@@ -2267,12 +2804,17 @@ export class Database {
   // a node is safe to mutate in place when it was created in the current transaction
   // (offset >= txStart), since no committed moment and no pre-concat sharing can
   // reference it. concat advances txStart (an implicit freeze) precisely so its
-  // shared subtrees fall below it here. for an ephemeral (non-array-list) top level
+  // shared subtrees fall below it here. for an ephemeral (non-transactional) database
   // there is no transaction, so everything is mutable in place until a concat first
   // sets txStart.
   btreeReusable(ptr: number): boolean {
-    if (this.txStart !== null) return ptr >= this.txStart;
-    return this.header.tag !== Tag.ARRAY_LIST;
+    // a transactional database outside a transaction can't reuse anything
+    try {
+      return !this.isOld(ptr);
+    } catch (e) {
+      if (e instanceof ExpectedTxStartException) return false;
+      throw e;
+    }
   }
 
   // write a new version of a node, reusing oldPtr's position in place if that node
@@ -2751,12 +3293,16 @@ export class Database {
   }
 
   readKvPair(kvSlot: Slot): KeyValuePair {
-    if (kvSlot.tag !== Tag.KV_PAIR) throw new UnexpectedTagException();
     this.core.seek(Number(kvSlot.value));
-    const reader = this.core.reader();
-    const bytes = new Uint8Array(KeyValuePair.length(this.header.hashSize));
-    reader.readFully(bytes);
-    return KeyValuePair.fromBytes(bytes, this.header.hashSize);
+    return decodeKvPair(this.core.reader(), kvSlot.tag, this.header.hashSize);
+  }
+
+  // writes a .kv_pair or .sorted_kv_pair entry at the end and returns its slot
+  writeKvPair(tag: Tag, kvPair: KeyValuePair): Slot {
+    const pos = this.core.length();
+    this.core.seek(pos);
+    encodeKvPair(this.core.writer(), tag, kvPair);
+    return new Slot(pos, tag);
   }
 
   // lexicographic comparison of the byte key stored at keySlot (a bytes or short_bytes
@@ -2800,7 +3346,7 @@ export class Database {
     }
   }
 
-  // descend by key to the matching leaf entry (the .kv_pair slot), or null
+  // descend by key to the matching leaf entry, or null
   sortedGet(rootPtr: number, key: Uint8Array): SortedSlot | null {
     let nodePtr = rootPtr;
     while (true) {
@@ -2887,25 +3433,22 @@ export class Database {
     return new Slot(pos, Tag.BYTES);
   }
 
-  // materialize a new leaf entry: write the key bytes and a KeyValuePair with an empty
-  // value (the caller fills it via valuePosition). the hash field is unused by sorted
-  // maps (navigation is by key bytes), so it is left zero.
+  // materialize a new leaf entry: write the key bytes and a key-value pair with an
+  // empty value (the caller fills it in). navigation is by key bytes, so the entry
+  // has no hash, except in version 0 databases, which older builds must still be
+  // able to read.
   sortedNewEntry(key: Uint8Array): SortedEntry {
     const keySlot = this.writeKey(key);
-    const writer = this.core.writer();
-    const kvPos = this.core.length();
-    const kvPair = new KeyValuePair(new Slot(), keySlot, new Uint8Array(this.header.hashSize));
-    this.core.seek(kvPos);
-    writer.write(kvPair.toBytes());
-    return new SortedEntry(new Slot(kvPos, Tag.KV_PAIR), keySlot, kvPos + this.header.hashSize + Slot.LENGTH);
+    const tag = this.header.streaming() ? Tag.SORTED_KV_PAIR : Tag.KV_PAIR;
+    const kvSlot = this.writeKvPair(tag, new KeyValuePair(new Slot(), keySlot, new Uint8Array(this.header.hashSize)));
+    return new SortedEntry(kvSlot, keySlot);
   }
 
   // insert key (or locate it for replacement) within the subtree at nodePtr,
   // path-copying nodes and maintaining separators + counts. the caller writes the value
-  // at the returned valuePosition.
+  // of the returned entry.
   sortedPut(nodePtr: number, key: Uint8Array): SortedInsertResult {
     const node = this.readSortedNode(nodePtr);
-    const writer = this.core.writer();
     switch (node.kind) {
       case BTreeNodeKind.LEAF: {
         // find the matching or insertion index
@@ -2922,20 +3465,13 @@ export class Database {
           // replace: return a writable value slot, copy-on-writing the kv_pair if it
           // belongs to a past moment
           const leaf = node;
-          const kvSlot = node.entries[idx];
-          let valuePosition: number;
-          if (this.btreeReusable(Number(kvSlot.value))) {
-            valuePosition = Number(kvSlot.value) + this.header.hashSize + Slot.LENGTH;
-          } else {
-            const kv = this.readKvPair(kvSlot);
-            const newKvPos = this.core.length();
-            this.core.seek(newKvPos);
-            writer.write(kv.toBytes());
-            leaf.entries[idx] = new Slot(newKvPos, Tag.KV_PAIR);
-            valuePosition = newKvPos + this.header.hashSize + Slot.LENGTH;
+          let kvSlot = node.entries[idx];
+          if (!this.btreeReusable(Number(kvSlot.value))) {
+            kvSlot = this.writeKvPair(kvSlot.tag, this.readKvPair(kvSlot));
+            leaf.entries[idx] = kvSlot;
           }
           const ptr = this.sortedWriteNode(leaf, nodePtr);
-          return new SortedInsertResult(ptr, node.num, valuePosition, false, null);
+          return new SortedInsertResult(ptr, node.num, kvSlot, false, null);
         }
 
         // insert a new entry at idx
@@ -2950,7 +3486,7 @@ export class Database {
           const leaf = new SortedNode(BTreeNodeKind.LEAF, total);
           for (let k = 0; k < total; k++) leaf.entries[k] = entries[k];
           const ptr = this.sortedWriteNode(leaf, nodePtr);
-          return new SortedInsertResult(ptr, total, entry.valuePosition, true, null);
+          return new SortedInsertResult(ptr, total, entry.kvSlot, true, null);
         }
 
         // overflow: split into two leaves; the new sibling's separator is the key of its
@@ -2964,7 +3500,7 @@ export class Database {
         const separator = this.readKvPair(entries[leftN]).keySlot;
         const leftPtr = this.sortedWriteNode(left, nodePtr);
         const rightPtr = this.writeSortedNode(right);
-        return new SortedInsertResult(leftPtr, leftN, entry.valuePosition, true, new SortedSplit(rightPtr, rightN, separator));
+        return new SortedInsertResult(leftPtr, leftN, entry.kvSlot, true, new SortedSplit(rightPtr, rightN, separator));
       }
       case BTreeNodeKind.BRANCH: {
         let i = 0;
@@ -2997,7 +3533,7 @@ export class Database {
             branch.counts[k] = counts[k];
           }
           const ptr = this.sortedWriteNode(branch, nodePtr);
-          return new SortedInsertResult(ptr, branch.subtreeCount(), child.valuePosition, child.added, null);
+          return new SortedInsertResult(ptr, branch.subtreeCount(), child.kvSlot, child.added, null);
         }
 
         // overflow: split into two branches; the new sibling's separator is the smallest
@@ -3022,7 +3558,7 @@ export class Database {
         return new SortedInsertResult(
           leftPtr,
           left.subtreeCount(),
-          child.valuePosition,
+          child.kvSlot,
           child.added,
           new SortedSplit(rightPtr, right.subtreeCount(), separator)
         );
@@ -3083,17 +3619,17 @@ export class Database {
     return result.nodePtr;
   }
 
-  // turn a located/inserted kv_pair (at kvPos) into the slot for the requested target.
-  // only the value is writeable (that is how put works); the key and the kv_pair pointer
-  // are immutable, so they are returned with no writeable position.
-  sortedTargetSlot(kvPos: number, target: SortedMapGetTarget): SlotPointer {
-    const kv = this.readKvPair(new Slot(kvPos, Tag.KV_PAIR));
+  // turn a located/inserted entry into the slot for the requested target. only the
+  // value is writeable (that is how put works); the key and the entry pointer are
+  // immutable, so they are returned with no writeable position.
+  sortedTargetSlot(kvSlot: Slot, target: SortedMapGetTarget): SlotPointer {
+    const kv = this.readKvPair(kvSlot);
     if (target instanceof SortedMapGetKVPair) {
-      return new SlotPointer(null, new Slot(kvPos, Tag.KV_PAIR));
+      return new SlotPointer(null, kvSlot);
     } else if (target instanceof SortedMapGetKey) {
       return new SlotPointer(null, kv.keySlot);
     } else if (target instanceof SortedMapGetValue) {
-      return new SlotPointer(kvPos + this.header.hashSize + Slot.LENGTH, kv.valueSlot);
+      return new SlotPointer(Number(kvSlot.value) + kvKeyOffset(kvSlot.tag, this.header.hashSize) + Slot.LENGTH, kv.valueSlot);
     } else {
       throw new UnexpectedTagException();
     }
@@ -3166,7 +3702,11 @@ class Compactor {
         return new Slot(newOffset, slot.tag, slot.full);
       }
       case Tag.KV_PAIR: {
-        const newOffset = this.visitObject(Number(slot.value), KeyValuePair.length(this.hashSize), (source, target) => this.populateKvPair(source, target));
+        const newOffset = this.visitObject(Number(slot.value), KeyValuePair.length(this.hashSize), (source, target) => this.populateKvPair(source, target, Tag.KV_PAIR));
+        return new Slot(newOffset, slot.tag, slot.full);
+      }
+      case Tag.SORTED_KV_PAIR: {
+        const newOffset = this.visitObject(Number(slot.value), SortedKeyValuePair.LENGTH, (source, target) => this.populateKvPair(source, target, Tag.SORTED_KV_PAIR));
         return new Slot(newOffset, slot.tag, slot.full);
       }
       case Tag.SORTED_MAP:
@@ -3509,21 +4049,14 @@ class Compactor {
     }
   }
 
-  private populateKvPair(sourceOffset: number, targetOffset: number): void {
-    // read KeyValuePair
+  private populateKvPair(sourceOffset: number, targetOffset: number, tag: Tag): void {
     this.sourceCore.seek(sourceOffset);
-    const sourceReader = this.sourceCore.reader();
-    const kvPairBytes = new Uint8Array(KeyValuePair.length(this.hashSize));
-    sourceReader.readFully(kvPairBytes);
-    const kvPair = KeyValuePair.fromBytes(kvPairBytes, this.hashSize);
+    const kvPair = decodeKvPair(this.sourceCore.reader(), tag, this.hashSize);
 
-    // remap key_slot and value_slot
-    const remappedKey = this.remapSlot(kvPair.keySlot);
-    const remappedValue = this.remapSlot(kvPair.valueSlot);
-
-    // write remapped KV pair (hash stays unchanged)
+    // remap key_slot and value_slot, and write the pair in the same form
+    kvPair.keySlot = this.remapSlot(kvPair.keySlot);
+    kvPair.valueSlot = this.remapSlot(kvPair.valueSlot);
     this.targetCore.seek(targetOffset);
-    const targetWriter = this.targetCore.writer();
-    targetWriter.write(new KeyValuePair(remappedValue, remappedKey, kvPair.hash).toBytes());
+    encodeKvPair(this.targetCore.writer(), tag, kvPair);
   }
 }

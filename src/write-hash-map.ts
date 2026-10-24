@@ -7,6 +7,7 @@ import {
   HashMapGetKey,
   HashMapRemove,
   WriteData,
+  Context,
 } from './database.js';
 import type { WriteableData } from './writeable-data.js';
 import { Bytes } from './writeable-data.js';
@@ -109,10 +110,14 @@ export class WriteHashMap extends ReadHashMap {
   }
 
   private putKeyInternal(hash: Uint8Array, data: WriteableData): void {
-    const cursor = (this.cursor as WriteCursor).writePath([
+    // the key is written in the same write as the lookup, so this works
+    // even when the map is the root of a streaming database, where each
+    // write is its own transaction. keys are only written if empty,
+    // because their value should always be the same at a given hash.
+    (this.cursor as WriteCursor).writePath([
       new HashMapGet(new HashMapGetKey(hash)),
+      new Context((cursor: WriteCursor) => cursor.writeIfEmpty(data)),
     ]);
-    cursor.writeIfEmpty(data);
   }
 
   private putKeyCursorInternal(hash: Uint8Array): WriteCursor {

@@ -15,10 +15,11 @@ export const enum Tag {
   COUNTED_HASH_SET = 13,
   SORTED_MAP = 14,
   SORTED_SET = 15,
+  SORTED_KV_PAIR = 16,
 }
 
 export function tagValueOf(n: number): Tag {
-  if (n < 0 || n > 15) {
+  if (n < 0 || n > 16) {
     throw new Error(`Invalid tag value: ${n}`);
   }
   return n as Tag;

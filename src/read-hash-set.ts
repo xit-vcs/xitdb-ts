@@ -13,7 +13,7 @@ export class ReadHashSet implements Slotted {
   constructor(cursor: ReadCursor);
   constructor(cursor?: ReadCursor) {
     if (cursor) {
-      switch (cursor.slotPtr.slot.tag) {
+      switch (cursor.resolved().slot.tag) {
         case Tag.NONE:
         case Tag.HASH_MAP:
         case Tag.HASH_SET:
