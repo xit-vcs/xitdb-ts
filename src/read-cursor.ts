@@ -45,12 +45,12 @@ export class ReadCursor implements Slotted {
     this.db = db;
   }
 
-  // for a streaming root cursor, this reads the root again (see `resolved`)
+  // for a root cursor, this reads the root again (see `resolved`)
   slot(): Slot {
     return this.resolved().slot;
   }
 
-  // a streaming root cursor only has a snapshot of the root slot,
+  // a root cursor only has a snapshot of the root slot,
   // which goes stale after the next transaction, so read it again.
   // the result points at the copy of the root slot in the newest
   // trailer, not the root header, so it is a fixed snapshot: the
@@ -58,7 +58,7 @@ export class ReadCursor implements Slotted {
   // one commit, even if more are made.
   // every method that reads `slotPtr` must go through this.
   resolved(): SlotPointer {
-    if (this.db.header.streaming() && this.db.isRoot(this.slotPtr)) {
+    if (Database.isRoot(this.slotPtr)) {
       const header = this.db.readRootHeader();
       if (header.fileSize < RootTrailer.LENGTH) throw new InvalidDatabaseException();
       // the root slot is the first thing in the trailer

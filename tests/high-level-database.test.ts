@@ -43,7 +43,6 @@ import {
   HashMapGetValue,
   Context,
   WriteData,
-  InvalidTopLevelTypeException,
   WriteNotAllowedException,
   CursorNotWriteableException,
   ExpectedTxStartException,
@@ -53,7 +52,6 @@ import {
   EndOfStreamException,
   Header,
   VERSION,
-  MAGIC_NUMBER,
   type ReplicaState,
 } from '../src';
 import { crc64 } from '../src/crc64';
@@ -65,44 +63,68 @@ const MAX_READ_BYTES = 1024;
 
 describe('High Level API', () => {
   test('in-memory storage', () => {
-    for (const legacy of [true, false]) {
-      using core = new CoreMemory();
-      const hasher = new Hasher('SHA-1');
-      testHighLevelApi(core, hasher, null, legacy);
-    }
+    using core = new CoreMemory();
+    const hasher = new Hasher('SHA-1');
+    testHighLevelApi(core, hasher, null);
   });
 
   test('file storage', () => {
-    for (const legacy of [true, false]) {
-      const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-'));
-      const filePath = join(tmpDir, 'test.db');
-      try {
-        using core = new CoreFile(filePath);
-        const hasher = new Hasher('SHA-1');
-        testHighLevelApi(core, hasher, filePath, legacy);
-      } finally {
-        rmSync(tmpDir, { recursive: true });
-      }
+    const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-'));
+    const filePath = join(tmpDir, 'test.db');
+    try {
+      using core = new CoreFile(filePath);
+      const hasher = new Hasher('SHA-1');
+      testHighLevelApi(core, hasher, filePath);
+    } finally {
+      rmSync(tmpDir, { recursive: true });
     }
   });
 
   test('buffered file storage', () => {
-    for (const legacy of [true, false]) {
-      const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-'));
-      const filePath = join(tmpDir, 'test.db');
-      try {
-        using core = new CoreBufferedFile(filePath);
-        const hasher = new Hasher('SHA-1');
-        testHighLevelApi(core, hasher, filePath, legacy);
-      } finally {
-        rmSync(tmpDir, { recursive: true });
-      }
+    const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-'));
+    const filePath = join(tmpDir, 'test.db');
+    try {
+      using core = new CoreBufferedFile(filePath);
+      const hasher = new Hasher('SHA-1');
+      testHighLevelApi(core, hasher, filePath);
+    } finally {
+      rmSync(tmpDir, { recursive: true });
     }
   });
 
   test('not using array list at top level', () => {
-    for (const legacy of [true, false]) {
-      testNotUsingArrayListAtTopLevel(legacy);
+    // normally an array list makes the most sense at the top level,
+    // but this test just ensures we can use other data structures
+    // at the top level. in theory a top-level hash map might make
+    // sense if we're using xitdb as a format to send data over a
+    // network. in that case, immutability isn't important because
+    // the data is just created and immediately sent over the wire.
+
+    // hash map
+    {
+      using core = new CoreMemory();
+      const hasher = new Hasher('SHA-1');
+      const db = new Database(core, hasher);
+
+      const map = new WriteHashMap(db.rootCursor());
+      map.put('foo', new Bytes('foo'));
+      map.put('bar', new Bytes('bar'));
+
+      // every write to the root is a transaction, so a nested
+      // cursor can't be written to after it was returned
+      const innerMapCursor = map.putCursor('inner-map');
+      assert.throws(() => new WriteHashMap(innerMapCursor), ExpectedTxStartException);
+    }
+
+    // linked array list
+    {
+      using core = new CoreMemory();
+      const hasher = new Hasher('SHA-1');
+      const db = new Database(core, hasher);
+
+      const list = new WriteLinkedArrayList(db.rootCursor());
+      list.append(new Uint(1));
+      assert.strictEqual(list.count(), 1);
     }
   });
 
@@ -303,78 +325,10 @@ describe('High Level API', () => {
   });
 });
 
-function testNotUsingArrayListAtTopLevel(legacy: boolean): void {
-  // normally an array list makes the most sense at the top level,
-  // but this test just ensures we can use other data structures
-  // at the top level. in theory a top-level hash map might make
-  // sense if we're using xitdb as a format to send data over a
-  // network. in that case, immutability isn't important because
-  // the data is just created and immediately sent over the wire.
-
-  // hash map
-  {
-    using core = new CoreMemory();
-    const hasher = new Hasher('SHA-1');
-    const db = initDb(core, hasher, legacy);
-
-    const map = new WriteHashMap(db.rootCursor());
-    map.put('foo', new Bytes('foo'));
-    map.put('bar', new Bytes('bar'));
-
-    if (legacy) {
-      // init inner map
-      {
-        const innerMapCursor = map.putCursor('inner-map');
-        new WriteHashMap(innerMapCursor);
-      }
-
-      // re-init inner map
-      // since the top-level type isn't an array list, there is no concept of
-      // a transaction, so this does not perform a copy of the root node
-      {
-        const innerMapCursor = map.putCursor('inner-map');
-        new WriteHashMap(innerMapCursor);
-      }
-    } else {
-      // in the newest version every write to the root is a transaction,
-      // so a nested cursor can't be written to after it was returned
-      const innerMapCursor = map.putCursor('inner-map');
-      assert.throws(() => new WriteHashMap(innerMapCursor), ExpectedTxStartException);
-    }
-  }
-
-  // linked array list is only allowed at the top level in the newest version
-  {
-    using core = new CoreMemory();
-    const hasher = new Hasher('SHA-1');
-    const db = initDb(core, hasher, legacy);
-
-    if (legacy) {
-      assert.throws(() => new WriteLinkedArrayList(db.rootCursor()), InvalidTopLevelTypeException);
-    } else {
-      const list = new WriteLinkedArrayList(db.rootCursor());
-      list.append(new Uint(1));
-      assert.strictEqual(list.count(), 1);
-    }
-  }
-}
-
-// creates a database. if `legacy` is true and the storage is empty, it first
-// writes a version 0 header, which is all an empty legacy database contains.
-function initDb(core: Core, hasher: Hasher, legacy: boolean): Database {
-  if (legacy && core.length() === 0) {
-    core.seek(0);
-    new Header(hasher.id, hasher.digestLength, 0, Tag.NONE, MAGIC_NUMBER).write(core);
-  }
-  const db = new Database(core, hasher);
-  assert.strictEqual(db.header.version, legacy ? 0 : VERSION);
-  return db;
-}
-
-function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null, legacy: boolean): void {
+function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null): void {
   // init the db
   core.setLength(0);
-  let db = initDb(core, hasher, legacy);
+  let db = new Database(core, hasher);
 
   // First transaction
   {
@@ -783,7 +737,7 @@ function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null, l
     core.flush();
     const sizeWithTail = core.length();
 
-    db = initDb(core, hasher, legacy);
+    db = new Database(core, hasher);
 
     const sizeAfter = core.length();
     assert.strictEqual(sizeWithTail, sizeAfter);
@@ -1005,87 +959,54 @@ function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null, l
 
 describe('Compaction', () => {
   test('in-memory storage', () => {
-    for (const legacy of [true, false]) {
-      using sourceCore = new CoreMemory();
-      using targetCore = new CoreMemory();
-      const hasher = new Hasher('SHA-1');
-      const offsetMap = new Map<number, number>();
-      offsetMap.set(0, 123);
-      testCompaction(sourceCore, targetCore, hasher, null, null, legacy, offsetMap);
-      assert.strictEqual(offsetMap.get(0), undefined);
-    }
+    using sourceCore = new CoreMemory();
+    using targetCore = new CoreMemory();
+    const hasher = new Hasher('SHA-1');
+    const offsetMap = new Map<number, number>();
+    offsetMap.set(0, 123);
+    testCompaction(sourceCore, targetCore, hasher, null, null, offsetMap);
+    assert.strictEqual(offsetMap.get(0), undefined);
   });
 
   test('file storage', () => {
-    for (const legacy of [true, false]) {
-      const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-compact-'));
-      const sourcePath = join(tmpDir, 'source.db');
-      const targetPath = join(tmpDir, 'target.db');
-      try {
-        using sourceCore = new CoreFile(sourcePath);
-        using targetCore = new CoreFile(targetPath);
-        const hasher = new Hasher('SHA-1');
-        testCompaction(sourceCore, targetCore, hasher, sourcePath, targetPath, legacy);
-      } finally {
-        rmSync(tmpDir, { recursive: true });
-      }
+    const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-compact-'));
+    const sourcePath = join(tmpDir, 'source.db');
+    const targetPath = join(tmpDir, 'target.db');
+    try {
+      using sourceCore = new CoreFile(sourcePath);
+      using targetCore = new CoreFile(targetPath);
+      const hasher = new Hasher('SHA-1');
+      testCompaction(sourceCore, targetCore, hasher, sourcePath, targetPath);
+    } finally {
+      rmSync(tmpDir, { recursive: true });
     }
   });
 
   test('buffered file storage', () => {
-    for (const legacy of [true, false]) {
-      const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-compact-'));
-      const sourcePath = join(tmpDir, 'source.db');
-      const targetPath = join(tmpDir, 'target.db');
-      try {
-        using sourceCore = new CoreBufferedFile(sourcePath);
-        using targetCore = new CoreBufferedFile(targetPath);
-        const hasher = new Hasher('SHA-1');
-        testCompaction(sourceCore, targetCore, hasher, sourcePath, targetPath, legacy);
-      } finally {
-        rmSync(tmpDir, { recursive: true });
-      }
+    const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-compact-'));
+    const sourcePath = join(tmpDir, 'source.db');
+    const targetPath = join(tmpDir, 'target.db');
+    try {
+      using sourceCore = new CoreBufferedFile(sourcePath);
+      using targetCore = new CoreBufferedFile(targetPath);
+      const hasher = new Hasher('SHA-1');
+      testCompaction(sourceCore, targetCore, hasher, sourcePath, targetPath);
+    } finally {
+      rmSync(tmpDir, { recursive: true });
     }
   });
 
   test('buffered file to in-memory storage', () => {
-    for (const legacy of [true, false]) {
-      const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-compact-'));
-      const sourcePath = join(tmpDir, 'source.db');
-      try {
-        using sourceCore = new CoreBufferedFile(sourcePath);
-        using targetCore = new CoreMemory();
-        const hasher = new Hasher('SHA-1');
-        testCompaction(sourceCore, targetCore, hasher, sourcePath, null, legacy);
-      } finally {
-        rmSync(tmpDir, { recursive: true });
-      }
+    const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-compact-'));
+    const sourcePath = join(tmpDir, 'source.db');
+    try {
+      using sourceCore = new CoreBufferedFile(sourcePath);
+      using targetCore = new CoreMemory();
+      const hasher = new Hasher('SHA-1');
+      testCompaction(sourceCore, targetCore, hasher, sourcePath, null);
+    } finally {
+      rmSync(tmpDir, { recursive: true });
     }
-  });
-
-  // compacting migrates a legacy database to the newest version
-  test('legacy to newest version', () => {
-    using sourceCore = new CoreMemory();
-    using targetCore = new CoreMemory();
-    const hasher = new Hasher('SHA-1');
-
-    const source = initDb(sourceCore, hasher, true);
-    assert.strictEqual(source.header.version, 0);
-    const history = new WriteArrayList(source.rootCursor());
-    history.append(new Uint(1));
-    history.append(new Uint(2));
-
-    const target = source.compact(targetCore);
-    assert.ok(target.header.streaming());
-    assert.strictEqual(target.header.version, VERSION);
-    const targetHistory = new ReadArrayList(target.rootCursor());
-    assert.strictEqual(targetHistory.count(), 1);
-    assert.strictEqual(targetHistory.getCursor(-1)!.readUint(), 2);
-
-    // and compacting a database in the newest version keeps it there
-    using compactedCore = new CoreMemory();
-    const compacted = target.compact(compactedCore);
-    assert.strictEqual(compacted.header.version, VERSION);
   });
 });
 
@@ -1109,11 +1030,9 @@ test('compaction with disk-backed offsets map', () => {
       // exercise the same data types, cycles, sharing, and reopening checks
       // as the in-memory offsets map, reusing the scratch map between runs.
       // reusing it must discard offsets from previous compactions.
-      for (const legacy of [true, false]) {
-        offsetMap.set(0, 123);
-        testCompaction(sourceCore, targetCore, hasher, sourcePath, targetPath, legacy, offsetMap);
-        assert.strictEqual(offsetMap.get(0), undefined);
-      }
+      offsetMap.set(0, 123);
+      testCompaction(sourceCore, targetCore, hasher, sourcePath, targetPath, offsetMap);
+      assert.strictEqual(offsetMap.get(0), undefined);
     });
   } finally {
     rmSync(tmpDir, { recursive: true });
@@ -1126,7 +1045,6 @@ function testCompaction(
   hasher: Hasher,
   sourcePath: string | null,
   targetPath: string | null,
-  legacy: boolean,
   offsetMap?: OffsetMap
 ): void {
   const decoder = new TextDecoder();
@@ -1135,16 +1053,16 @@ function testCompaction(
   {
     sourceCore.setLength(0);
     targetCore.setLength(0);
-    const source = initDb(sourceCore, hasher, legacy);
+    const source = new Database(sourceCore, hasher);
     const compacted = source.compact(targetCore, offsetMap);
-    assert.strictEqual(compacted.header.tag, Tag.NONE);
+    assert.ok(compacted.rootCursor().slot().empty());
   }
 
   // basic compaction with various data types
   {
     sourceCore.setLength(0);
     targetCore.setLength(0);
-    const source = initDb(sourceCore, hasher, legacy);
+    const source = new Database(sourceCore, hasher);
 
     // moment 1
     {
@@ -1346,7 +1264,7 @@ function testCompaction(
   {
     sourceCore.setLength(0);
     targetCore.setLength(0);
-    const source = initDb(sourceCore, hasher, legacy);
+    const source = new Database(sourceCore, hasher);
 
     // moment 1: create many keys
     {
@@ -1392,7 +1310,7 @@ function testCompaction(
     {
       sourceCore.setLength(0);
       targetCore.setLength(0);
-      const source = initDb(sourceCore, hasher, legacy);
+      const source = new Database(sourceCore, hasher);
 
       // write some data
       {
@@ -1424,7 +1342,7 @@ function testCompaction(
     {
       sourceCore.setLength(0);
       targetCore.setLength(0);
-      const source = initDb(sourceCore, hasher, legacy);
+      const source = new Database(sourceCore, hasher);
 
       // write initial data
       {
@@ -1468,40 +1386,34 @@ function testCompaction(
 }
 describe('Sorted Map', () => {
   test('in-memory storage', () => {
-    for (const legacy of [true, false]) {
-      using core = new CoreMemory();
-      testSortedMap(core, new Hasher('SHA-1'), legacy);
-    }
+    using core = new CoreMemory();
+    testSortedMap(core, new Hasher('SHA-1'));
   });
 
   test('file storage', () => {
-    for (const legacy of [true, false]) {
-      const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-'));
-      try {
-        using core = new CoreFile(join(tmpDir, 'test.db'));
-        testSortedMap(core, new Hasher('SHA-1'), legacy);
-      } finally {
-        rmSync(tmpDir, { recursive: true });
-      }
+    const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-'));
+    try {
+      using core = new CoreFile(join(tmpDir, 'test.db'));
+      testSortedMap(core, new Hasher('SHA-1'));
+    } finally {
+      rmSync(tmpDir, { recursive: true });
     }
   });
 
   test('buffered file storage', () => {
-    for (const legacy of [true, false]) {
-      const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-'));
-      try {
-        using core = new CoreBufferedFile(join(tmpDir, 'test.db'));
-        testSortedMap(core, new Hasher('SHA-1'), legacy);
-      } finally {
-        rmSync(tmpDir, { recursive: true });
-      }
+    const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-'));
+    try {
+      using core = new CoreBufferedFile(join(tmpDir, 'test.db'));
+      testSortedMap(core, new Hasher('SHA-1'));
+    } finally {
+      rmSync(tmpDir, { recursive: true });
     }
   });
 });
 
-function testSortedMap(core: Core, hasher: Hasher, legacy: boolean): void {
+function testSortedMap(core: Core, hasher: Hasher): void {
   core.setLength(0);
-  const db = initDb(core, hasher, legacy);
+  const db = new Database(core, hasher);
   const decoder = new TextDecoder();
 
   // keys "k0000".."k0059" sort lexicographically in numeric order
@@ -1673,9 +1585,9 @@ function testSortedMap(core: Core, hasher: Hasher, legacy: boolean): void {
     assert.strictEqual(map.count(), COUNT / 2);
     assert.strictEqual(decoder.decode(map.getIndexKeyValuePair(0)!.keyCursor.readBytes(MAX_READ_BYTES)), 'k0001');
 
-    // entries have no hash, except in version 0 databases
+    // entries have no hash
     const entry = map.cursor.readPathSlot([new SortedMapGet(new SortedMapGetKVPair(new TextEncoder().encode('k0001')))])!;
-    assert.strictEqual(entry.tag, legacy ? Tag.KV_PAIR : Tag.SORTED_KV_PAIR);
+    assert.strictEqual(entry.tag, Tag.SORTED_KV_PAIR);
   }
 
   // a second moment that inherits and mutates the map must not disturb the first
@@ -1708,40 +1620,34 @@ function testSortedMap(core: Core, hasher: Hasher, legacy: boolean): void {
 
 describe('Iterator From Index', () => {
   test('in-memory storage', () => {
-    for (const legacy of [true, false]) {
-      using core = new CoreMemory();
-      testIteratorFrom(core, new Hasher('SHA-1'), legacy);
-    }
+    using core = new CoreMemory();
+    testIteratorFrom(core, new Hasher('SHA-1'));
   });
 
   test('file storage', () => {
-    for (const legacy of [true, false]) {
-      const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-'));
-      try {
-        using core = new CoreFile(join(tmpDir, 'test.db'));
-        testIteratorFrom(core, new Hasher('SHA-1'), legacy);
-      } finally {
-        rmSync(tmpDir, { recursive: true });
-      }
+    const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-'));
+    try {
+      using core = new CoreFile(join(tmpDir, 'test.db'));
+      testIteratorFrom(core, new Hasher('SHA-1'));
+    } finally {
+      rmSync(tmpDir, { recursive: true });
     }
   });
 
   test('buffered file storage', () => {
-    for (const legacy of [true, false]) {
-      const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-'));
-      try {
-        using core = new CoreBufferedFile(join(tmpDir, 'test.db'));
-        testIteratorFrom(core, new Hasher('SHA-1'), legacy);
-      } finally {
-        rmSync(tmpDir, { recursive: true });
-      }
+    const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-'));
+    try {
+      using core = new CoreBufferedFile(join(tmpDir, 'test.db'));
+      testIteratorFrom(core, new Hasher('SHA-1'));
+    } finally {
+      rmSync(tmpDir, { recursive: true });
     }
   });
 });
 
-function testIteratorFrom(core: Core, hasher: Hasher, legacy: boolean): void {
+function testIteratorFrom(core: Core, hasher: Hasher): void {
   core.setLength(0);
-  const db = initDb(core, hasher, legacy);
+  const db = new Database(core, hasher);
 
   // enough items to force several tiers in both the array-list radix trie
   // (16^2 = 256 > 200) and the linked-array-list b-tree
@@ -1821,36 +1727,36 @@ function testIteratorFrom(core: Core, hasher: Hasher, legacy: boolean): void {
   }
 }
 
-describe('Streaming', () => {
+describe('Replication', () => {
   test('in-memory storage', () => {
     using sourceCore = new CoreMemory();
     using replicaCore = new CoreMemory();
     const hasher = new Hasher('SHA-1');
-    testStreaming(sourceCore, replicaCore, hasher);
-    testStreamingRoots(sourceCore, replicaCore, hasher);
+    testReplication(sourceCore, replicaCore, hasher);
+    testRoots(sourceCore, replicaCore, hasher);
   });
 
   test('file storage', () => {
-    const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-streaming-'));
+    const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-replication-'));
     try {
       using sourceCore = new CoreFile(join(tmpDir, 'main.db'));
       using replicaCore = new CoreFile(join(tmpDir, 'replica.db'));
       const hasher = new Hasher('SHA-1');
-      testStreaming(sourceCore, replicaCore, hasher);
-      testStreamingRoots(sourceCore, replicaCore, hasher);
+      testReplication(sourceCore, replicaCore, hasher);
+      testRoots(sourceCore, replicaCore, hasher);
     } finally {
       rmSync(tmpDir, { recursive: true });
     }
   });
 
   test('buffered file storage', () => {
-    const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-streaming-'));
+    const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-replication-'));
     try {
       using sourceCore = new CoreBufferedFile(join(tmpDir, 'main.db'));
       using replicaCore = new CoreBufferedFile(join(tmpDir, 'replica.db'));
       const hasher = new Hasher('SHA-1');
-      testStreaming(sourceCore, replicaCore, hasher);
-      testStreamingRoots(sourceCore, replicaCore, hasher);
+      testReplication(sourceCore, replicaCore, hasher);
+      testRoots(sourceCore, replicaCore, hasher);
     } finally {
       rmSync(tmpDir, { recursive: true });
     }
@@ -1991,10 +1897,10 @@ function replicate(source: Database, replica: Database): void {
 
 // checks that no committed byte has changed since `committed` was read,
 // except the root header (the root slot and file size after the database
-// header and file ID). then replicates and checks that the replica is identical.
+// header). then replicates and checks that the replica is identical.
 // returns the committed bytes, to be passed to the next call.
 function expectAppendOnlyAndReplicate(source: Database, replica: Database, committed: Uint8Array): Uint8Array {
-  const rootHeaderStart = Header.LENGTH + 8;
+  const rootHeaderStart = Header.LENGTH;
   const rootHeaderEnd = rootHeaderStart + 17;
   const current = readCommittedBytes(source, 0);
   assert.ok(current.length >= committed.length);
@@ -2013,7 +1919,7 @@ function expectSameCommittedBytes(source: Database, replica: Database): void {
   assert.deepStrictEqual(sourceBytes, replicaBytes);
 }
 
-function testStreaming(sourceCore: Core, replicaCore: Core, hasher: Hasher): void {
+function testReplication(sourceCore: Core, replicaCore: Core, hasher: Hasher): void {
   const ctx = (i: number, fail: boolean = false) => (cursor: WriteCursor) => {
     const moment = new WriteHashMap(cursor);
     moment.put(hashKey(`key-${i}`), new Uint(i));
@@ -2029,8 +1935,8 @@ function testStreaming(sourceCore: Core, replicaCore: Core, hasher: Hasher): voi
   const source = new Database(sourceCore, hasher, 0x0102030405060708n);
   let replica = new Database(replicaCore, hasher);
 
-  // a new streaming database is its header, its file ID, its root header, and
-  // the trailer for its empty root: the slot (9 zero bytes), the commit ID (0 for
+  // a new database is its header (which ends with its file ID), its root
+  // header, and the trailer for its empty root: the slot (9 zero bytes), the commit ID (0 for
   // the first commit), then the CRC-64/XZ of the file ID, the trailer's position
   // (37), the slot, and the commit ID
   {
@@ -2051,11 +1957,7 @@ function testStreaming(sourceCore: Core, replicaCore: Core, hasher: Hasher): voi
   replicate(source, replica);
   expectSameCommittedBytes(source, replica);
 
-  // older builds can't open streaming databases
-  assert.strictEqual(source.header.version, 1);
-
-  // the root slot carries the type of the top-level data
-  assert.strictEqual(source.header.tag, Tag.NONE);
+  assert.strictEqual(source.header.version, VERSION);
 
   const history = new WriteArrayList(source.rootCursor());
 
@@ -2158,8 +2060,8 @@ function testStreaming(sourceCore: Core, replicaCore: Core, hasher: Hasher): voi
   }
 }
 
-// in streaming mode, the root can be any type, not just an array list
-function testStreamingRoots(sourceCore: Core, replicaCore: Core, hasher: Hasher): void {
+// the root can be any type, not just an array list
+function testRoots(sourceCore: Core, replicaCore: Core, hasher: Hasher): void {
   // a hash map root
   {
     sourceCore.setLength(0);
@@ -2263,7 +2165,6 @@ function testStreamingRoots(sourceCore: Core, replicaCore: Core, hasher: Hasher)
       const offsetMap = new Map<number, number>();
 
       const target = replica.compact(targetCore, offsetMap);
-      assert.ok(target.header.streaming());
       assert.ok(target.committedSize() < replica.committedSize());
 
       const targetMap = new ReadHashMap(target.rootCursor());
@@ -2386,24 +2287,5 @@ function testStreamingRoots(sourceCore: Core, replicaCore: Core, hasher: Hasher)
     const size = db.committedSize();
     new WriteLinkedArrayList(db.rootCursor());
     assert.strictEqual(db.committedSize(), size);
-  }
-
-  // a legacy database whose root is a hash map can be compacted into a streaming one
-  {
-    sourceCore.setLength(0);
-    const db = initDb(sourceCore, hasher, true);
-    assert.ok(!db.header.streaming());
-
-    const map = new WriteCountedHashMap(db.rootCursor());
-    map.put(hashKey('foo'), new Uint(1));
-    map.put(hashKey('bar'), new Uint(2));
-
-    using targetCore = new CoreMemory();
-    const offsetMap = new Map<number, number>();
-    const target = db.compact(targetCore, offsetMap);
-    assert.ok(target.header.streaming());
-    const targetMap = new ReadCountedHashMap(target.rootCursor());
-    assert.strictEqual(targetMap.count(), 2);
-    assert.strictEqual(targetMap.getCursor(hashKey('bar'))!.readUint(), 2);
   }
 }

@@ -28,7 +28,6 @@ export {
   StreamTooLongException,
   EndOfStreamException,
   InvalidOffsetException,
-  InvalidTopLevelTypeException,
   ExpectedUnsignedLongException,
   NoAvailableSlotsException,
   MustSetNewSlotsToFullException,
@@ -37,7 +36,6 @@ export {
   InvalidFormatTagSizeException,
   UnexpectedWriterPositionException,
   MaxShiftExceededException,
-  StreamingModeRequiredException,
   InvalidRangeException,
   TargetNotEmptyException,
 } from './exceptions.js';
@@ -59,7 +57,6 @@ export {
   WriteMode,
   Header,
   ArrayListHeader,
-  TopLevelArrayListHeader,
   BTreeHeader,
   KeyValuePair,
   SortedKeyValuePair,

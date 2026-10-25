@@ -21,7 +21,6 @@ export class PathPartMustBeAtEndException extends DatabaseException {}
 export class StreamTooLongException extends DatabaseException {}
 export class EndOfStreamException extends DatabaseException {}
 export class InvalidOffsetException extends DatabaseException {}
-export class InvalidTopLevelTypeException extends DatabaseException {}
 export class ExpectedUnsignedLongException extends DatabaseException {}
 export class NoAvailableSlotsException extends DatabaseException {}
 export class MustSetNewSlotsToFullException extends DatabaseException {}
@@ -34,6 +33,5 @@ export class InvalidBTreeNodeException extends DatabaseException {}
 export class InvalidBTreeNodeKindException extends DatabaseException {}
 export class Uint64OverflowException extends DatabaseException {}
 export class Int64OverflowException extends DatabaseException {}
-export class StreamingModeRequiredException extends DatabaseException {}
 export class InvalidRangeException extends DatabaseException {}
 export class TargetNotEmptyException extends DatabaseException {}

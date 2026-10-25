@@ -23,7 +23,6 @@ import {
   InvalidVersionException,
   KeyNotFoundException,
   EndOfStreamException,
-  CursorNotWriteableException,
   ArrayListInit,
   ArrayListGet,
   ArrayListAppend,
@@ -43,8 +42,6 @@ import {
   WriteData,
   Context,
   VERSION,
-  MAGIC_NUMBER,
-  Header,
   SLOT_COUNT,
   MASK,
 } from '../src';
@@ -114,12 +111,11 @@ describe('Low Level API', () => {
   test('expired writers', () => {
     const db = new Database(new CoreMemory(), new Hasher('SHA-1'));
     const history = new WriteArrayList(db.rootCursor());
-    // in streaming mode, the callback runs inside a transaction on the root,
+    // the callback runs inside a transaction on the root,
     // so the top-level write inside it is a nested one
-    const expectedError = db.header.streaming() ? /Nested top-level writes are not allowed/ : CursorNotWriteableException;
     assert.throws(() => db.rootCursor().writePath([
       new Context(cursor => history.append(new Int(999))),
-    ]), expectedError);
+    ]), /Nested top-level writes are not allowed/);
     assert.strictEqual(history.count(), 0);
     let escaped: WriteHashMap;
     let bytes: Writer;
@@ -158,38 +154,32 @@ describe('Low Level API', () => {
   });
 
   test('in-memory storage', () => {
-    for (const legacy of [true, false]) {
-      using core = new CoreMemory();
-      const hasher = new Hasher('SHA-1');
-      testLowLevelApi(core, hasher, legacy);
-    }
+    using core = new CoreMemory();
+    const hasher = new Hasher('SHA-1');
+    testLowLevelApi(core, hasher);
   });
 
   test('file storage', () => {
-    for (const legacy of [true, false]) {
-      const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-'));
-      const filePath = join(tmpDir, 'test.db');
-      try {
-        using core = new CoreFile(filePath);
-        const hasher = new Hasher('SHA-1');
-        testLowLevelApi(core, hasher, legacy);
-      } finally {
-        rmSync(tmpDir, { recursive: true });
-      }
+    const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-'));
+    const filePath = join(tmpDir, 'test.db');
+    try {
+      using core = new CoreFile(filePath);
+      const hasher = new Hasher('SHA-1');
+      testLowLevelApi(core, hasher);
+    } finally {
+      rmSync(tmpDir, { recursive: true });
     }
   }, 20000);
 
   test('buffered file storage', () => {
-    for (const legacy of [true, false]) {
-      const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-'));
-      const filePath = join(tmpDir, 'test.db');
-      try {
-        using core = new CoreBufferedFile(filePath);
-        const hasher = new Hasher('SHA-1');
-        testLowLevelApi(core, hasher, legacy);
-      } finally {
-        rmSync(tmpDir, { recursive: true });
-      }
+    const tmpDir = mkdtempSync(join(tmpdir(), 'xitdb-'));
+    const filePath = join(tmpDir, 'test.db');
+    try {
+      using core = new CoreBufferedFile(filePath);
+      const hasher = new Hasher('SHA-1');
+      testLowLevelApi(core, hasher);
+    } finally {
+      rmSync(tmpDir, { recursive: true });
     }
   }, 20000);
 
@@ -259,33 +249,21 @@ describe('Low Level API', () => {
   });
 });
 
-// creates a database. if `legacy` is true and the storage is empty, it first
-// writes a version 0 header, which is all an empty legacy database contains.
-function initDb(core: Core, hasher: Hasher, legacy: boolean): Database {
-  if (legacy && core.length() === 0) {
-    core.seek(0);
-    new Header(hasher.id, hasher.digestLength, 0, Tag.NONE, MAGIC_NUMBER).write(core);
-  }
-  const db = new Database(core, hasher);
-  assert.strictEqual(db.header.version, legacy ? 0 : VERSION);
-  return db;
-}
-
-function testLowLevelApi(core: Core, hasher: Hasher, legacy: boolean): void {
+function testLowLevelApi(core: Core, hasher: Hasher): void {
   // open and re-open database
   {
     // make empty database
     core.setLength(0);
-    initDb(core, hasher, legacy);
+    new Database(core, hasher);
 
     // re-open without error
-    let db = initDb(core, hasher, legacy);
+    let db = new Database(core, hasher);
     const writer = db.core.writer();
     db.core.seek(0);
     writer.writeByte('g'.charCodeAt(0));
 
     // re-open with error
-    assert.throws(() => initDb(core, hasher, legacy), InvalidDatabaseException);
+    assert.throws(() => new Database(core, hasher), InvalidDatabaseException);
 
     // modify the version
     db.core.seek(0);
@@ -294,7 +272,7 @@ function testLowLevelApi(core: Core, hasher: Hasher, legacy: boolean): void {
     writer.writeShort(VERSION + 1);
 
     // re-open with error
-    assert.throws(() => initDb(core, hasher, legacy), InvalidVersionException);
+    assert.throws(() => new Database(core, hasher), InvalidVersionException);
   }
 
   // save hash id in header
@@ -304,7 +282,7 @@ function testLowLevelApi(core: Core, hasher: Hasher, legacy: boolean): void {
 
     // make empty database
     core.setLength(0);
-    const db = initDb(core, hasherWithHashId, legacy);
+    const db = new Database(core, hasherWithHashId);
 
     // verify hash id was stored
     assert.strictEqual(db.hasher.id, hashId);
@@ -314,7 +292,7 @@ function testLowLevelApi(core: Core, hasher: Hasher, legacy: boolean): void {
   // array_list of hash_maps
   {
     core.setLength(0);
-    const db = initDb(core, hasher, legacy);
+    const db = new Database(core, hasher);
     const rootCursor = db.rootCursor();
 
     // write foo -> bar with a writer
@@ -1013,7 +991,7 @@ function testLowLevelApi(core: Core, hasher: Hasher, legacy: boolean): void {
   // append to top-level array_list many times, filling up the array_list until a root overflow occurs
   {
     core.setLength(0);
-    const db = initDb(core, hasher, legacy);
+    const db = new Database(core, hasher);
     const rootCursor = db.rootCursor();
 
     const watKey = db.hasher.digest(new TextEncoder().encode('wat'));
@@ -1100,7 +1078,7 @@ function testLowLevelApi(core: Core, hasher: Hasher, legacy: boolean): void {
   // append to inner array_list many times, filling up the array_list until a root overflow occurs
   {
     core.setLength(0);
-    const db = initDb(core, hasher, legacy);
+    const db = new Database(core, hasher);
     const rootCursor = db.rootCursor();
 
     for (let i = 0; i < SLOT_COUNT + 1; i++) {
@@ -1188,7 +1166,7 @@ function testLowLevelApi(core: Core, hasher: Hasher, legacy: boolean): void {
   // iterate over inner array_list
   {
     core.setLength(0);
-    const db = initDb(core, hasher, legacy);
+    const db = new Database(core, hasher);
     const rootCursor = db.rootCursor();
 
     // add wats
@@ -1251,7 +1229,7 @@ function testLowLevelApi(core: Core, hasher: Hasher, legacy: boolean): void {
   // iterate over inner hash_map
   {
     core.setLength(0);
-    const db = initDb(core, hasher, legacy);
+    const db = new Database(core, hasher);
     const rootCursor = db.rootCursor();
 
     // add wats
@@ -1348,33 +1326,33 @@ function testLowLevelApi(core: Core, hasher: Hasher, legacy: boolean): void {
 
   {
     // slice linked_array_list
-    testSlice(core, hasher, SLOT_COUNT * 5 + 1, 10, 5, legacy);
-    testSlice(core, hasher, SLOT_COUNT * 5 + 1, 0, SLOT_COUNT * 2, legacy);
-    testSlice(core, hasher, SLOT_COUNT * 5, SLOT_COUNT * 3, SLOT_COUNT, legacy);
-    testSlice(core, hasher, SLOT_COUNT * 5, SLOT_COUNT * 3, SLOT_COUNT * 2, legacy);
-    testSlice(core, hasher, SLOT_COUNT * 2, 10, SLOT_COUNT, legacy);
-    testSlice(core, hasher, 2, 0, 2, legacy);
-    testSlice(core, hasher, 2, 1, 1, legacy);
-    testSlice(core, hasher, 1, 0, 0, legacy);
+    testSlice(core, hasher, SLOT_COUNT * 5 + 1, 10, 5);
+    testSlice(core, hasher, SLOT_COUNT * 5 + 1, 0, SLOT_COUNT * 2);
+    testSlice(core, hasher, SLOT_COUNT * 5, SLOT_COUNT * 3, SLOT_COUNT);
+    testSlice(core, hasher, SLOT_COUNT * 5, SLOT_COUNT * 3, SLOT_COUNT * 2);
+    testSlice(core, hasher, SLOT_COUNT * 2, 10, SLOT_COUNT);
+    testSlice(core, hasher, 2, 0, 2);
+    testSlice(core, hasher, 2, 1, 1);
+    testSlice(core, hasher, 1, 0, 0);
 
     // concat linked_array_list
-    testConcat(core, hasher, SLOT_COUNT * 5 + 1, SLOT_COUNT + 1, legacy);
-    testConcat(core, hasher, SLOT_COUNT, SLOT_COUNT, legacy);
-    testConcat(core, hasher, 1, 1, legacy);
-    testConcat(core, hasher, 0, 0, legacy);
+    testConcat(core, hasher, SLOT_COUNT * 5 + 1, SLOT_COUNT + 1);
+    testConcat(core, hasher, SLOT_COUNT, SLOT_COUNT);
+    testConcat(core, hasher, 1, 1);
+    testConcat(core, hasher, 0, 0);
 
     // insert linked_array_list
-    testInsertAndRemove(core, hasher, 1, 0, legacy);
-    testInsertAndRemove(core, hasher, 10, 0, legacy);
-    testInsertAndRemove(core, hasher, 10, 5, legacy);
-    testInsertAndRemove(core, hasher, 10, 9, legacy);
-    testInsertAndRemove(core, hasher, SLOT_COUNT * 5, SLOT_COUNT * 2, legacy);
+    testInsertAndRemove(core, hasher, 1, 0);
+    testInsertAndRemove(core, hasher, 10, 0);
+    testInsertAndRemove(core, hasher, 10, 5);
+    testInsertAndRemove(core, hasher, 10, 9);
+    testInsertAndRemove(core, hasher, SLOT_COUNT * 5, SLOT_COUNT * 2);
   }
 
   // concat linked_array_list multiple times
   {
     core.setLength(0);
-    const db = initDb(core, hasher, legacy);
+    const db = new Database(core, hasher);
     const rootCursor = db.rootCursor();
 
     const evenKey = db.hasher.digest(new TextEncoder().encode('even'));
@@ -1454,7 +1432,7 @@ function testLowLevelApi(core: Core, hasher: Hasher, legacy: boolean): void {
   // append items to linked_array_list without setting their value
   {
     core.setLength(0);
-    const db = initDb(core, hasher, legacy);
+    const db = new Database(core, hasher);
     const rootCursor = db.rootCursor();
 
     // appending without setting any value should work
@@ -1484,7 +1462,7 @@ function testLowLevelApi(core: Core, hasher: Hasher, legacy: boolean): void {
   // insert at beginning of linked_array_list many times
   {
     core.setLength(0);
-    const db = initDb(core, hasher, legacy);
+    const db = new Database(core, hasher);
     const rootCursor = db.rootCursor();
 
     rootCursor.writePath([
@@ -1511,7 +1489,7 @@ function testLowLevelApi(core: Core, hasher: Hasher, legacy: boolean): void {
   // insert at end of linked_array_list many times
   {
     core.setLength(0);
-    const db = initDb(core, hasher, legacy);
+    const db = new Database(core, hasher);
     const rootCursor = db.rootCursor();
 
     rootCursor.writePath([
@@ -1560,10 +1538,9 @@ function testSlice(
   originalSize: number,
   sliceOffset: number,
   sliceSize: number,
-  legacy: boolean
 ): void {
   core.setLength(0);
-  const db = initDb(core, hasher, legacy);
+  const db = new Database(core, hasher);
   const rootCursor = db.rootCursor();
 
   const evenKey = db.hasher.digest(new TextEncoder().encode('even'));
@@ -1661,9 +1638,9 @@ function testSlice(
   ]);
 }
 
-function testConcat(core: Core, hasher: Hasher, listASize: number, listBSize: number, legacy: boolean): void {
+function testConcat(core: Core, hasher: Hasher, listASize: number, listBSize: number): void {
   core.setLength(0);
-  const db = initDb(core, hasher, legacy);
+  const db = new Database(core, hasher);
   const rootCursor = db.rootCursor();
 
   const evenKey = db.hasher.digest(new TextEncoder().encode('even'));
@@ -1754,9 +1731,9 @@ function testConcat(core: Core, hasher: Hasher, listASize: number, listBSize: nu
   ]);
 }
 
-function testInsertAndRemove(core: Core, hasher: Hasher, originalSize: number, insertIndex: number, legacy: boolean): void {
+function testInsertAndRemove(core: Core, hasher: Hasher, originalSize: number, insertIndex: number): void {
   core.setLength(0);
-  const db = initDb(core, hasher, legacy);
+  const db = new Database(core, hasher);
   const rootCursor = db.rootCursor();
 
   const evenKey = db.hasher.digest(new TextEncoder().encode('even'));
