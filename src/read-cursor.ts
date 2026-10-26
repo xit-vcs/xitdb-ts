@@ -39,10 +39,14 @@ export class KeyValuePairCursor {
 export class ReadCursor implements Slotted {
   public slotPtr: SlotPointer;
   public db: Database;
+  // writes through this cursor copy any data written before this
+  // position, even within the transaction (see `WriteCursor.freeze`)
+  public frozenAt: number;
 
-  constructor(slotPtr: SlotPointer, db: Database) {
+  constructor(slotPtr: SlotPointer, db: Database, frozenAt: number = 0) {
     this.slotPtr = slotPtr;
     this.db = db;
+    this.frozenAt = frozenAt;
   }
 
   // for a root cursor, this reads the root again (see `resolved`)
@@ -68,12 +72,12 @@ export class ReadCursor implements Slotted {
   }
 
   resolvedCursor(): ReadCursor {
-    return new ReadCursor(this.resolved(), this.db);
+    return new ReadCursor(this.resolved(), this.db, this.frozenAt);
   }
 
   readPath(path: PathPart[]): ReadCursor | null {
     try {
-      const slotPtr = this.db.readSlotPointer(WriteMode.READ_ONLY, path, 0, this.resolved());
+      const slotPtr = this.db.readSlotPointer(WriteMode.READ_ONLY, path, 0, this.resolved(), this.frozenAt);
       return new ReadCursor(slotPtr, this.db);
     } catch (e) {
       if (e instanceof KeyNotFoundException) {
@@ -85,7 +89,7 @@ export class ReadCursor implements Slotted {
 
   readPathSlot(path: PathPart[]): Slot | null {
     try {
-      const slotPtr = this.db.readSlotPointer(WriteMode.READ_ONLY, path, 0, this.resolved());
+      const slotPtr = this.db.readSlotPointer(WriteMode.READ_ONLY, path, 0, this.resolved(), this.frozenAt);
       if (!slotPtr.slot.empty()) {
         return slotPtr.slot;
       } else {
@@ -200,8 +204,8 @@ export class ReadCursor implements Slotted {
     const valueSlotPos = keySlotPos + Slot.LENGTH;
 
     return new KeyValuePairCursor(
-      new ReadCursor(new SlotPointer(valueSlotPos, kvPair.valueSlot), this.db),
-      new ReadCursor(new SlotPointer(keySlotPos, kvPair.keySlot), this.db),
+      new ReadCursor(new SlotPointer(valueSlotPos, kvPair.valueSlot), this.db, this.frozenAt),
+      new ReadCursor(new SlotPointer(keySlotPos, kvPair.keySlot), this.db, this.frozenAt),
       kvPair.hash
     );
   }
@@ -786,7 +790,7 @@ export class CursorIterator {
           this.stack[this.stack.length - 1].index += 1;
           if (!nextSlot.empty()) {
             const position = level.position + level.index * Slot.LENGTH;
-            return new ReadCursor(new SlotPointer(position, nextSlot), this.cursor.db);
+            return new ReadCursor(new SlotPointer(position, nextSlot), this.cursor.db, this.cursor.frozenAt);
           } else {
             continue;
           }

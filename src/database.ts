@@ -492,7 +492,8 @@ export interface PathPartBase {
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
-    slotPtr: SlotPointer
+    slotPtr: SlotPointer,
+    frozenAt: number
   ): SlotPointer;
 }
 
@@ -544,7 +545,8 @@ export class ArrayListInit implements PathPartBase {
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
-    slotPtr: SlotPointer
+    slotPtr: SlotPointer,
+    frozenAt: number
   ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
 
@@ -563,7 +565,7 @@ export class ArrayListInit implements PathPartBase {
         const nextSlotPtr = new SlotPointer(position, new Slot(arrayListStart, Tag.ARRAY_LIST));
         db.core.seek(position);
         writer.write(nextSlotPtr.slot.toBytes());
-        return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr);
+        return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr, frozenAt);
       }
       case Tag.ARRAY_LIST: {
         const reader = db.core.reader();
@@ -572,7 +574,7 @@ export class ArrayListInit implements PathPartBase {
         let arrayListStart = Number(slotPtr.slot.value);
 
         // copy it to the end unless it was made in this transaction
-        if (db.isOld(arrayListStart)) {
+        if (db.isOld(arrayListStart, frozenAt)) {
           db.core.seek(arrayListStart);
           const headerBytes = new Uint8Array(ArrayListHeader.LENGTH);
           reader.readFully(headerBytes);
@@ -592,7 +594,7 @@ export class ArrayListInit implements PathPartBase {
         const nextSlotPtr = new SlotPointer(position, new Slot(arrayListStart, Tag.ARRAY_LIST));
         db.core.seek(position);
         writer.write(nextSlotPtr.slot.toBytes());
-        return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr);
+        return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr, frozenAt);
       }
       default:
         throw new UnexpectedTagException();
@@ -609,7 +611,8 @@ export class ArrayListGet implements PathPartBase {
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
-    slotPtr: SlotPointer
+    slotPtr: SlotPointer,
+    frozenAt: number
   ): SlotPointer {
     switch (slotPtr.slot.tag) {
       case Tag.NONE:
@@ -620,7 +623,7 @@ export class ArrayListGet implements PathPartBase {
         throw new UnexpectedTagException();
     }
 
-    if (writeMode === WriteMode.READ_WRITE) slotPtr = db.copyCollectionIfFrozen(slotPtr, new ArrayListInit());
+    if (writeMode === WriteMode.READ_WRITE) slotPtr = db.copyCollectionIfFrozen(slotPtr, new ArrayListInit(), frozenAt);
     const nextArrayListStart = Number(slotPtr.slot.value);
     let index = this.index;
 
@@ -636,9 +639,9 @@ export class ArrayListGet implements PathPartBase {
     const key = index < 0 ? header.size - Math.abs(index) : index;
     const lastKey = header.size - 1;
     const shift = lastKey < SLOT_COUNT ? 0 : Math.floor(Math.log(lastKey) / Math.log(SLOT_COUNT));
-    const finalSlotPtr = db.readArrayListSlot(header.ptr, key, shift, writeMode);
+    const finalSlotPtr = db.readArrayListSlot(header.ptr, key, shift, writeMode, frozenAt);
 
-    return db.readSlotPointer(writeMode, path, pathI + 1, finalSlotPtr);
+    return db.readSlotPointer(writeMode, path, pathI + 1, finalSlotPtr, frozenAt);
   }
 }
 
@@ -650,14 +653,15 @@ export class ArrayListAppend implements PathPartBase {
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
-    slotPtr: SlotPointer
+    slotPtr: SlotPointer,
+    frozenAt: number
   ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
 
     if (slotPtr.slot.tag !== Tag.ARRAY_LIST) throw new UnexpectedTagException();
 
     const reader = db.core.reader();
-    slotPtr = db.copyCollectionIfFrozen(slotPtr, new ArrayListInit());
+    slotPtr = db.copyCollectionIfFrozen(slotPtr, new ArrayListInit(), frozenAt);
     const nextArrayListStart = Number(slotPtr.slot.value);
 
     db.core.seek(nextArrayListStart);
@@ -665,7 +669,7 @@ export class ArrayListAppend implements PathPartBase {
     reader.readFully(headerBytes);
     const origHeader = ArrayListHeader.fromBytes(headerBytes);
 
-    const appendResult = db.readArrayListSlotAppend(origHeader, writeMode);
+    const appendResult = db.readArrayListSlotAppend(origHeader, writeMode, frozenAt);
     // update the header before callbacks can freeze it
     const writer = db.core.writer();
     db.core.seek(nextArrayListStart);
@@ -675,7 +679,7 @@ export class ArrayListAppend implements PathPartBase {
     if (db.transaction !== null && slotPtr.position === db.transaction.scratchPosition) {
       db.transaction.rootPosition = appendResult.slotPtr.position;
     }
-    return db.readSlotPointer(writeMode, path, pathI + 1, appendResult.slotPtr);
+    return db.readSlotPointer(writeMode, path, pathI + 1, appendResult.slotPtr, frozenAt);
   }
 }
 
@@ -688,13 +692,14 @@ export class ArrayListSlice implements PathPartBase {
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
-    slotPtr: SlotPointer
+    slotPtr: SlotPointer,
+    frozenAt: number
   ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
     if (slotPtr.slot.tag !== Tag.ARRAY_LIST) throw new UnexpectedTagException();
 
     const reader = db.core.reader();
-    slotPtr = db.copyCollectionIfFrozen(slotPtr, new ArrayListInit());
+    slotPtr = db.copyCollectionIfFrozen(slotPtr, new ArrayListInit(), frozenAt);
     const nextArrayListStart = Number(slotPtr.slot.value);
 
     db.core.seek(nextArrayListStart);
@@ -702,12 +707,12 @@ export class ArrayListSlice implements PathPartBase {
     reader.readFully(headerBytes);
     const origHeader = ArrayListHeader.fromBytes(headerBytes);
 
-    const sliceHeader = db.readArrayListSlice(origHeader, this.size);
+    const sliceHeader = db.readArrayListSlice(origHeader, this.size, frozenAt);
     // update the header before callbacks can freeze it
     const writer = db.core.writer();
     db.core.seek(nextArrayListStart);
     writer.write(sliceHeader.toBytes());
-    return db.readSlotPointer(writeMode, path, pathI + 1, slotPtr);
+    return db.readSlotPointer(writeMode, path, pathI + 1, slotPtr, frozenAt);
   }
 }
 
@@ -719,7 +724,8 @@ export class LinkedArrayListInit implements PathPartBase {
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
-    slotPtr: SlotPointer
+    slotPtr: SlotPointer,
+    frozenAt: number
   ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
     if (slotPtr.position === null) throw new CursorNotWriteableException();
@@ -737,7 +743,7 @@ export class LinkedArrayListInit implements PathPartBase {
         const nextSlotPtr = new SlotPointer(position, new Slot(headerPtr, Tag.LINKED_ARRAY_LIST));
         db.core.seek(position);
         writer.write(nextSlotPtr.slot.toBytes());
-        return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr);
+        return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr, frozenAt);
       }
       case Tag.LINKED_ARRAY_LIST: {
         let headerPtr = Number(slotPtr.slot.value);
@@ -745,7 +751,7 @@ export class LinkedArrayListInit implements PathPartBase {
         // moments still pointing at the old header are unaffected. b-tree nodes are
         // always appended, so only the header (updated in place by later operations
         // in this tx) needs copying.
-        if (db.isOld(headerPtr)) {
+        if (db.isOld(headerPtr, frozenAt)) {
           const reader = db.core.reader();
           db.core.seek(headerPtr);
           const headerBytes = new Uint8Array(BTreeHeader.LENGTH);
@@ -757,7 +763,7 @@ export class LinkedArrayListInit implements PathPartBase {
         const nextSlotPtr = new SlotPointer(position, new Slot(headerPtr, Tag.LINKED_ARRAY_LIST));
         db.core.seek(position);
         writer.write(nextSlotPtr.slot.toBytes());
-        return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr);
+        return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr, frozenAt);
       }
       default:
         throw new UnexpectedTagException();
@@ -774,7 +780,8 @@ export class LinkedArrayListGet implements PathPartBase {
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
-    slotPtr: SlotPointer
+    slotPtr: SlotPointer,
+    frozenAt: number
   ): SlotPointer {
     switch (slotPtr.slot.tag) {
       case Tag.NONE:
@@ -787,7 +794,7 @@ export class LinkedArrayListGet implements PathPartBase {
 
     const index = this.index;
 
-    if (writeMode === WriteMode.READ_WRITE) slotPtr = db.copyCollectionIfFrozen(slotPtr, new LinkedArrayListInit());
+    if (writeMode === WriteMode.READ_WRITE) slotPtr = db.copyCollectionIfFrozen(slotPtr, new LinkedArrayListInit(), frozenAt);
     const headerPtr = Number(slotPtr.slot.value);
     const reader = db.core.reader();
     db.core.seek(headerPtr);
@@ -801,17 +808,17 @@ export class LinkedArrayListGet implements PathPartBase {
 
     if (writeMode === WriteMode.READ_ONLY) {
       const finalSlotPtr = db.readBTreeSlot(header.rootPtr, rank);
-      return db.readSlotPointer(writeMode, path, pathI + 1, finalSlotPtr);
+      return db.readSlotPointer(writeMode, path, pathI + 1, finalSlotPtr, frozenAt);
     } else {
       // path-copy down to the value slot so the write is persistent
-      const writeSlot = db.btreeGetForWrite(header.rootPtr, rank);
+      const writeSlot = db.btreeGetForWrite(header.rootPtr, rank, frozenAt);
       // update the header before callbacks can freeze it
       if (writeSlot.nodePtr !== header.rootPtr) {
         const writer = db.core.writer();
         db.core.seek(headerPtr);
         writer.write(new BTreeHeader(writeSlot.nodePtr, header.size).toBytes());
       }
-      return db.readSlotPointer(writeMode, path, pathI + 1, new SlotPointer(writeSlot.valuePosition, writeSlot.slot));
+      return db.readSlotPointer(writeMode, path, pathI + 1, new SlotPointer(writeSlot.valuePosition, writeSlot.slot), frozenAt);
     }
   }
 }
@@ -824,12 +831,13 @@ export class LinkedArrayListAppend implements PathPartBase {
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
-    slotPtr: SlotPointer
+    slotPtr: SlotPointer,
+    frozenAt: number
   ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
     if (slotPtr.slot.tag !== Tag.LINKED_ARRAY_LIST) throw new UnexpectedTagException();
 
-    slotPtr = db.copyCollectionIfFrozen(slotPtr, new LinkedArrayListInit());
+    slotPtr = db.copyCollectionIfFrozen(slotPtr, new LinkedArrayListInit(), frozenAt);
     const headerPtr = Number(slotPtr.slot.value);
     const reader = db.core.reader();
     db.core.seek(headerPtr);
@@ -837,7 +845,7 @@ export class LinkedArrayListAppend implements PathPartBase {
     reader.readFully(headerBytes);
     const header = BTreeHeader.fromBytes(headerBytes);
 
-    const result = db.btreeInsert(header.rootPtr, header.size);
+    const result = db.btreeInsert(header.rootPtr, header.size, frozenAt);
     const newRootPtr = db.btreeGrowRoot(result);
 
     // update the header before filling in the value, so that a failure in the
@@ -851,7 +859,8 @@ export class LinkedArrayListAppend implements PathPartBase {
       writeMode,
       path,
       pathI + 1,
-      new SlotPointer(result.valuePosition, new Slot())
+      new SlotPointer(result.valuePosition, new Slot()),
+      frozenAt
     );
   }
 }
@@ -865,12 +874,13 @@ export class LinkedArrayListSlice implements PathPartBase {
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
-    slotPtr: SlotPointer
+    slotPtr: SlotPointer,
+    frozenAt: number
   ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
     if (slotPtr.slot.tag !== Tag.LINKED_ARRAY_LIST) throw new UnexpectedTagException();
 
-    slotPtr = db.copyCollectionIfFrozen(slotPtr, new LinkedArrayListInit());
+    slotPtr = db.copyCollectionIfFrozen(slotPtr, new LinkedArrayListInit(), frozenAt);
     const headerPtr = Number(slotPtr.slot.value);
     const reader = db.core.reader();
     db.core.seek(headerPtr);
@@ -894,7 +904,7 @@ export class LinkedArrayListSlice implements PathPartBase {
     db.core.seek(headerPtr);
     writer.write(new BTreeHeader(newRootPtr, this.size).toBytes());
 
-    return db.readSlotPointer(writeMode, path, pathI + 1, slotPtr);
+    return db.readSlotPointer(writeMode, path, pathI + 1, slotPtr, frozenAt);
   }
 }
 
@@ -907,13 +917,14 @@ export class LinkedArrayListConcat implements PathPartBase {
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
-    slotPtr: SlotPointer
+    slotPtr: SlotPointer,
+    frozenAt: number
   ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
     if (slotPtr.slot.tag !== Tag.LINKED_ARRAY_LIST) throw new UnexpectedTagException();
     if (this.list.tag !== Tag.LINKED_ARRAY_LIST) throw new UnexpectedTagException();
 
-    slotPtr = db.copyCollectionIfFrozen(slotPtr, new LinkedArrayListInit());
+    slotPtr = db.copyCollectionIfFrozen(slotPtr, new LinkedArrayListInit(), frozenAt);
     const headerPtr = Number(slotPtr.slot.value);
     const reader = db.core.reader();
     db.core.seek(headerPtr);
@@ -938,7 +949,7 @@ export class LinkedArrayListConcat implements PathPartBase {
     db.core.seek(headerPtr);
     writer.write(new BTreeHeader(newRootPtr, headerA.size + headerB.size).toBytes());
 
-    return db.readSlotPointer(writeMode, path, pathI + 1, slotPtr);
+    return db.readSlotPointer(writeMode, path, pathI + 1, slotPtr, frozenAt);
   }
 }
 
@@ -951,12 +962,13 @@ export class LinkedArrayListInsert implements PathPartBase {
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
-    slotPtr: SlotPointer
+    slotPtr: SlotPointer,
+    frozenAt: number
   ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
     if (slotPtr.slot.tag !== Tag.LINKED_ARRAY_LIST) throw new UnexpectedTagException();
 
-    slotPtr = db.copyCollectionIfFrozen(slotPtr, new LinkedArrayListInit());
+    slotPtr = db.copyCollectionIfFrozen(slotPtr, new LinkedArrayListInit(), frozenAt);
     const headerPtr = Number(slotPtr.slot.value);
     const reader = db.core.reader();
     db.core.seek(headerPtr);
@@ -970,7 +982,7 @@ export class LinkedArrayListInsert implements PathPartBase {
     }
     const rank = index < 0 ? header.size - Math.abs(index) : index;
 
-    const result = db.btreeInsert(header.rootPtr, rank);
+    const result = db.btreeInsert(header.rootPtr, rank, frozenAt);
     const newRootPtr = db.btreeGrowRoot(result);
 
     // update the header before filling in the value, so that a failure in the
@@ -983,7 +995,8 @@ export class LinkedArrayListInsert implements PathPartBase {
       writeMode,
       path,
       pathI + 1,
-      new SlotPointer(result.valuePosition, new Slot())
+      new SlotPointer(result.valuePosition, new Slot()),
+      frozenAt
     );
   }
 }
@@ -997,12 +1010,13 @@ export class LinkedArrayListRemove implements PathPartBase {
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
-    slotPtr: SlotPointer
+    slotPtr: SlotPointer,
+    frozenAt: number
   ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
     if (slotPtr.slot.tag !== Tag.LINKED_ARRAY_LIST) throw new UnexpectedTagException();
 
-    slotPtr = db.copyCollectionIfFrozen(slotPtr, new LinkedArrayListInit());
+    slotPtr = db.copyCollectionIfFrozen(slotPtr, new LinkedArrayListInit(), frozenAt);
     const headerPtr = Number(slotPtr.slot.value);
     const reader = db.core.reader();
     db.core.seek(headerPtr);
@@ -1020,8 +1034,8 @@ export class LinkedArrayListRemove implements PathPartBase {
     if (header.size === 1) {
       newRootPtr = db.btreeNewRoot();
     } else {
-      let root = db.btreeRemove(header.rootPtr, rank);
-      newRootPtr = db.btreeWriteNode(root, header.rootPtr);
+      let root = db.btreeRemove(header.rootPtr, rank, frozenAt);
+      newRootPtr = db.btreeWriteNode(root, header.rootPtr, frozenAt);
       // a root left with one child is replaced by it
       while (root.kind === BTreeNodeKind.BRANCH && root.num === 1) {
         newRootPtr = Number(root.children[0].value);
@@ -1035,7 +1049,7 @@ export class LinkedArrayListRemove implements PathPartBase {
     db.core.seek(headerPtr);
     writer.write(new BTreeHeader(newRootPtr, header.size - 1).toBytes());
 
-    return db.readSlotPointer(writeMode, path, pathI + 1, slotPtr);
+    return db.readSlotPointer(writeMode, path, pathI + 1, slotPtr, frozenAt);
   }
 }
 
@@ -1048,7 +1062,8 @@ export class HashMapInit implements PathPartBase {
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
-    slotPtr: SlotPointer
+    slotPtr: SlotPointer,
+    frozenAt: number
   ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
 
@@ -1072,7 +1087,7 @@ export class HashMapInit implements PathPartBase {
         const nextSlotPtr = new SlotPointer(position, new Slot(mapStart, tag));
         db.core.seek(position);
         writer.write(nextSlotPtr.slot.toBytes());
-        return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr);
+        return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr, frozenAt);
       }
       case Tag.HASH_MAP:
       case Tag.HASH_SET:
@@ -1102,7 +1117,7 @@ export class HashMapInit implements PathPartBase {
         let mapStart = Number(slotPtr.slot.value);
 
         // copy it to the end unless it was made in this transaction
-        if (db.isOld(mapStart)) {
+        if (db.isOld(mapStart, frozenAt)) {
           db.core.seek(mapStart);
           let mapCountMaybe: number | null = null;
           if (this.counted) {
@@ -1122,7 +1137,7 @@ export class HashMapInit implements PathPartBase {
         const nextSlotPtr = new SlotPointer(position, new Slot(mapStart, tag));
         db.core.seek(position);
         writer.write(nextSlotPtr.slot.toBytes());
-        return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr);
+        return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr, frozenAt);
       }
       default:
         throw new UnexpectedTagException();
@@ -1139,7 +1154,8 @@ export class HashMapGet implements PathPartBase {
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
-    slotPtr: SlotPointer
+    slotPtr: SlotPointer,
+    frozenAt: number
   ): SlotPointer {
     let counted = false;
     switch (slotPtr.slot.tag) {
@@ -1156,10 +1172,10 @@ export class HashMapGet implements PathPartBase {
         throw new UnexpectedTagException();
     }
 
-    if (writeMode === WriteMode.READ_WRITE) slotPtr = db.copyCollectionIfFrozen(slotPtr, new HashMapInit(counted, slotPtr.slot.tag === Tag.HASH_SET || slotPtr.slot.tag === Tag.COUNTED_HASH_SET));
+    if (writeMode === WriteMode.READ_WRITE) slotPtr = db.copyCollectionIfFrozen(slotPtr, new HashMapInit(counted, slotPtr.slot.tag === Tag.HASH_SET || slotPtr.slot.tag === Tag.COUNTED_HASH_SET), frozenAt);
     const indexPos = counted ? Number(slotPtr.slot.value) + 8 : Number(slotPtr.slot.value);
     const hash = db.checkHash(this.target);
-    const res = db.readMapSlot(indexPos, hash, 0, writeMode, this.target);
+    const res = db.readMapSlot(indexPos, hash, 0, writeMode, this.target, frozenAt);
 
     if (writeMode === WriteMode.READ_WRITE && counted && res.isEmpty) {
       const reader = db.core.reader();
@@ -1170,7 +1186,7 @@ export class HashMapGet implements PathPartBase {
       writer.writeLong(mapCount + 1);
     }
 
-    return db.readSlotPointer(writeMode, path, pathI + 1, res.slotPtr);
+    return db.readSlotPointer(writeMode, path, pathI + 1, res.slotPtr, frozenAt);
   }
 }
 
@@ -1183,7 +1199,8 @@ export class HashMapRemove implements PathPartBase {
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
-    slotPtr: SlotPointer
+    slotPtr: SlotPointer,
+    frozenAt: number
   ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
 
@@ -1202,13 +1219,13 @@ export class HashMapRemove implements PathPartBase {
         throw new UnexpectedTagException();
     }
 
-    slotPtr = db.copyCollectionIfFrozen(slotPtr, new HashMapInit(counted, slotPtr.slot.tag === Tag.HASH_SET || slotPtr.slot.tag === Tag.COUNTED_HASH_SET));
+    slotPtr = db.copyCollectionIfFrozen(slotPtr, new HashMapInit(counted, slotPtr.slot.tag === Tag.HASH_SET || slotPtr.slot.tag === Tag.COUNTED_HASH_SET), frozenAt);
     const indexPos = counted ? Number(slotPtr.slot.value) + 8 : Number(slotPtr.slot.value);
     const hash = db.checkHashBytes(this.hash);
 
     let keyFound = true;
     try {
-      db.removeMapSlot(indexPos, hash, 0);
+      db.removeMapSlot(indexPos, hash, 0, frozenAt);
     } catch (e) {
       if (e instanceof KeyNotFoundException) {
         keyFound = false;
@@ -1241,7 +1258,8 @@ export class SortedMapInit implements PathPartBase {
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
-    slotPtr: SlotPointer
+    slotPtr: SlotPointer,
+    frozenAt: number
   ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
     if (slotPtr.position === null) throw new CursorNotWriteableException();
@@ -1257,14 +1275,14 @@ export class SortedMapInit implements PathPartBase {
         const nextSlotPtr = new SlotPointer(position, new Slot(headerPtr, tag));
         db.core.seek(position);
         writer.write(nextSlotPtr.slot.toBytes());
-        return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr);
+        return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr, frozenAt);
       }
       case Tag.SORTED_MAP:
       case Tag.SORTED_SET: {
         if (slotPtr.slot.tag !== tag) throw new UnexpectedTagException();
         let headerPtr = Number(slotPtr.slot.value);
         // copy the header into this transaction unless it was made in it
-        if (db.isOld(headerPtr)) {
+        if (db.isOld(headerPtr, frozenAt)) {
           const reader = db.core.reader();
           db.core.seek(headerPtr);
           const headerBytes = new Uint8Array(BTreeHeader.LENGTH);
@@ -1276,7 +1294,7 @@ export class SortedMapInit implements PathPartBase {
         const nextSlotPtr = new SlotPointer(position, new Slot(headerPtr, tag));
         db.core.seek(position);
         writer.write(nextSlotPtr.slot.toBytes());
-        return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr);
+        return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr, frozenAt);
       }
       default:
         throw new UnexpectedTagException();
@@ -1293,7 +1311,8 @@ export class SortedMapGet implements PathPartBase {
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
-    slotPtr: SlotPointer
+    slotPtr: SlotPointer,
+    frozenAt: number
   ): SlotPointer {
     switch (slotPtr.slot.tag) {
       case Tag.NONE:
@@ -1307,7 +1326,7 @@ export class SortedMapGet implements PathPartBase {
 
     const key = this.target.key;
 
-    if (writeMode === WriteMode.READ_WRITE) slotPtr = db.copyCollectionIfFrozen(slotPtr, new SortedMapInit(slotPtr.slot.tag === Tag.SORTED_SET));
+    if (writeMode === WriteMode.READ_WRITE) slotPtr = db.copyCollectionIfFrozen(slotPtr, new SortedMapInit(slotPtr.slot.tag === Tag.SORTED_SET), frozenAt);
     const headerPtr = Number(slotPtr.slot.value);
     const reader = db.core.reader();
     db.core.seek(headerPtr);
@@ -1319,9 +1338,9 @@ export class SortedMapGet implements PathPartBase {
       const found = db.sortedGet(header.rootPtr, key);
       if (found === null) throw new KeyNotFoundException();
       const targetSlot = db.sortedTargetSlot(found.slot, this.target);
-      return db.readSlotPointer(writeMode, path, pathI + 1, targetSlot);
+      return db.readSlotPointer(writeMode, path, pathI + 1, targetSlot, frozenAt);
     } else {
-      const result = db.sortedPut(header.rootPtr, key);
+      const result = db.sortedPut(header.rootPtr, key, frozenAt);
       const newRootPtr = db.sortedGrowRoot(result);
 
       // update the header before filling in the value, so that a failure in the
@@ -1332,7 +1351,7 @@ export class SortedMapGet implements PathPartBase {
       writer.write(new BTreeHeader(newRootPtr, header.size + (result.added ? 1 : 0)).toBytes());
 
       const targetSlot = db.sortedTargetSlot(result.kvSlot, this.target);
-      return db.readSlotPointer(writeMode, path, pathI + 1, targetSlot);
+      return db.readSlotPointer(writeMode, path, pathI + 1, targetSlot, frozenAt);
     }
   }
 }
@@ -1346,7 +1365,8 @@ export class SortedMapGetIndex implements PathPartBase {
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
-    slotPtr: SlotPointer
+    slotPtr: SlotPointer,
+    frozenAt: number
   ): SlotPointer {
     if (writeMode === WriteMode.READ_WRITE) throw new WriteNotAllowedException();
 
@@ -1376,7 +1396,7 @@ export class SortedMapGetIndex implements PathPartBase {
     const found = db.sortedGetByIndex(header.rootPtr, rank);
     // return the entry so the caller can read key and value
     const targetSlot = new SlotPointer(found.position, found.slot);
-    return db.readSlotPointer(writeMode, path, pathI + 1, targetSlot);
+    return db.readSlotPointer(writeMode, path, pathI + 1, targetSlot, frozenAt);
   }
 }
 
@@ -1389,7 +1409,8 @@ export class SortedMapRemove implements PathPartBase {
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
-    slotPtr: SlotPointer
+    slotPtr: SlotPointer,
+    frozenAt: number
   ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
 
@@ -1403,7 +1424,7 @@ export class SortedMapRemove implements PathPartBase {
         throw new UnexpectedTagException();
     }
 
-    slotPtr = db.copyCollectionIfFrozen(slotPtr, new SortedMapInit(slotPtr.slot.tag === Tag.SORTED_SET));
+    slotPtr = db.copyCollectionIfFrozen(slotPtr, new SortedMapInit(slotPtr.slot.tag === Tag.SORTED_SET), frozenAt);
     const headerPtr = Number(slotPtr.slot.value);
     const reader = db.core.reader();
     db.core.seek(headerPtr);
@@ -1411,7 +1432,7 @@ export class SortedMapRemove implements PathPartBase {
     reader.readFully(headerBytes);
     const header = BTreeHeader.fromBytes(headerBytes);
 
-    const result = db.sortedRemove(header.rootPtr, this.key);
+    const result = db.sortedRemove(header.rootPtr, this.key, frozenAt);
     if (!result.found) throw new KeyNotFoundException();
 
     const writer = db.core.writer();
@@ -1431,7 +1452,8 @@ export class WriteData implements PathPartBase {
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
-    slotPtr: SlotPointer
+    slotPtr: SlotPointer,
+    frozenAt: number
   ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
     if (slotPtr.position === null) throw new CursorNotWriteableException();
@@ -1487,7 +1509,7 @@ export class WriteData implements PathPartBase {
     writer.write(slot.toBytes());
 
     const nextSlotPtr = new SlotPointer(slotPtr.position, slot);
-    return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr);
+    return db.readSlotPointer(writeMode, path, pathI + 1, nextSlotPtr, frozenAt);
   }
 }
 
@@ -1500,12 +1522,13 @@ export class Context implements PathPartBase {
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
-    slotPtr: SlotPointer
+    slotPtr: SlotPointer,
+    frozenAt: number
   ): SlotPointer {
     if (writeMode === WriteMode.READ_ONLY) throw new WriteNotAllowedException();
     if (pathI !== path.length - 1) throw new PathPartMustBeAtEndException();
 
-    const nextCursor = new WriteCursor(slotPtr, db);
+    const nextCursor = new WriteCursor(slotPtr, db, db.transaction, frozenAt);
     this.fn(nextCursor);
     return nextCursor.slotPtr;
   }
@@ -1985,16 +2008,17 @@ export class Database {
     }
   }
 
-  // whether the data at `ptr` predates this transaction, so it must be
-  // copied before it is modified. writes only happen inside a transaction.
-  isOld(ptr: number): boolean {
+  // whether the data at `ptr` predates this transaction, or the writing
+  // cursor's freeze point, so it must be copied before it is modified.
+  // writes only happen inside a transaction.
+  isOld(ptr: number, frozenAt: number): boolean {
     if (this.txStart === null) throw new ExpectedTxStartException();
-    return ptr < this.txStart;
+    return ptr < Math.max(this.txStart, frozenAt);
   }
 
   // copies an index block to the end unless it was made in this transaction
-  copyIndexBlockIfOld(ptr: number): number {
-    if (!this.isOld(ptr)) return ptr;
+  copyIndexBlockIfOld(ptr: number, frozenAt: number): number {
+    if (!this.isOld(ptr, frozenAt)) return ptr;
     const indexBlock = new Uint8Array(INDEX_BLOCK_SIZE);
     this.core.seek(ptr);
     this.core.reader().readFully(indexBlock);
@@ -2025,10 +2049,10 @@ export class Database {
   }
 
   // copy frozen collection storage before mutation to preserve existing readers
-  copyCollectionIfFrozen(slotPtr: SlotPointer, init: PathPart): SlotPointer {
+  copyCollectionIfFrozen(slotPtr: SlotPointer, init: PathPart, frozenAt: number): SlotPointer {
     if (this.transaction !== null
       && this.transaction.frozenAt !== null && slotPtr.slot.value < this.transaction.frozenAt) {
-      return init.readSlotPointer(this, WriteMode.READ_WRITE, [init], 0, slotPtr);
+      return init.readSlotPointer(this, WriteMode.READ_WRITE, [init], 0, slotPtr, frozenAt);
     }
     return slotPtr;
   }
@@ -2037,7 +2061,8 @@ export class Database {
     writeMode: WriteMode,
     path: PathPart[],
     pathI: number,
-    slotPtr: SlotPointer
+    slotPtr: SlotPointer,
+    frozenAt: number
   ): SlotPointer {
     if (pathI === path.length) {
       if (writeMode === WriteMode.READ_ONLY && slotPtr.slot.empty()) {
@@ -2053,7 +2078,7 @@ export class Database {
       // the position of a read path doesn't matter, but it must not be
       // ROOT_HEADER_START or this would recurse forever
       if (writeMode === WriteMode.READ_ONLY) {
-        return this.readSlotPointer(writeMode, path, pathI, new SlotPointer(null, root));
+        return this.readSlotPointer(writeMode, path, pathI, new SlotPointer(null, root), frozenAt);
       }
 
       // initializing an initialized root is free, so a wrapper like
@@ -2088,10 +2113,10 @@ export class Database {
         // has no enclosing init part, so run one here.
         const initPart = Database.initPartFor(root.tag);
         if (initPart !== null) {
-          rootPtr = this.readSlotPointer(writeMode, [initPart], 0, rootPtr);
+          rootPtr = this.readSlotPointer(writeMode, [initPart], 0, rootPtr, frozenAt);
         }
 
-        let result = this.readSlotPointer(writeMode, path, pathI, rootPtr);
+        let result = this.readSlotPointer(writeMode, path, pathI, rootPtr, frozenAt);
 
         // the copy now holds the new root, so commit it
         this.core.seek(scratchPos);
@@ -2113,7 +2138,7 @@ export class Database {
 
     if (writeMode === WriteMode.READ_WRITE) this.checkFrozenSlot(slotPtr);
     const part = path[pathI];
-    return part.readSlotPointer(this, writeMode, path, pathI, slotPtr);
+    return part.readSlotPointer(this, writeMode, path, pathI, slotPtr, frozenAt);
   }
 
   // HashMap methods
@@ -2122,7 +2147,8 @@ export class Database {
     keyHash: Uint8Array,
     keyOffset: number,
     writeMode: WriteMode,
-    target: HashMapGetTarget
+    target: HashMapGetTarget,
+    frozenAt: number
   ): HashMapGetResult {
     if (keyOffset > (this.header.hashSize * 8) / BIT_COUNT) {
       throw new KeyOffsetExceededException();
@@ -2174,7 +2200,7 @@ export class Database {
       case Tag.INDEX: {
         let nextPtr = ptr;
         if (writeMode === WriteMode.READ_WRITE) {
-          nextPtr = this.copyIndexBlockIfOld(ptr);
+          nextPtr = this.copyIndexBlockIfOld(ptr, frozenAt);
           if (nextPtr !== ptr) {
             // make slot point to the copied block
             const writer = this.core.writer();
@@ -2182,7 +2208,7 @@ export class Database {
             writer.write(new Slot(nextPtr, Tag.INDEX).toBytes());
           }
         }
-        return this.readMapSlot(nextPtr, keyHash, keyOffset + 1, writeMode, target);
+        return this.readMapSlot(nextPtr, keyHash, keyOffset + 1, writeMode, target, frozenAt);
       }
       case Tag.KV_PAIR: {
         this.core.seek(ptr);
@@ -2192,7 +2218,7 @@ export class Database {
 
         if (arraysEqual(kvPair.hash, keyHash)) {
           if (writeMode === WriteMode.READ_WRITE) {
-            if (this.isOld(ptr)) {
+            if (this.isOld(ptr, frozenAt)) {
               const writer = this.core.writer();
               const hashPos = this.core.length();
               this.core.seek(hashPos);
@@ -2242,7 +2268,7 @@ export class Database {
               writer.write(new Uint8Array(INDEX_BLOCK_SIZE));
               this.core.seek(nextIndexPos + Slot.LENGTH * nextI);
               writer.write(slot.toBytes());
-              const res = this.readMapSlot(nextIndexPos, keyHash, keyOffset + 1, writeMode, target);
+              const res = this.readMapSlot(nextIndexPos, keyHash, keyOffset + 1, writeMode, target, frozenAt);
               this.core.seek(slotPos);
               writer.write(new Slot(nextIndexPos, Tag.INDEX).toBytes());
               return res;
@@ -2260,7 +2286,8 @@ export class Database {
   removeMapSlot(
     indexPos: number,
     keyHash: Uint8Array,
-    keyOffset: number
+    keyOffset: number,
+    frozenAt: number
   ): Slot {
     if (keyOffset > (this.header.hashSize * 8) / BIT_COUNT) {
       throw new KeyOffsetExceededException();
@@ -2287,7 +2314,7 @@ export class Database {
       case Tag.NONE:
         throw new KeyNotFoundException();
       case Tag.INDEX:
-        nextSlot = this.removeMapSlot(Number(slot.value), keyHash, keyOffset + 1);
+        nextSlot = this.removeMapSlot(Number(slot.value), keyHash, keyOffset + 1, frozenAt);
         break;
       case Tag.KV_PAIR: {
         this.core.seek(Number(slot.value));
@@ -2339,7 +2366,7 @@ export class Database {
     // there was more than one used slot, or a single .index slot,
     // so we must keep this index block. update the slot in it,
     // copying the block first unless it belongs to this transaction.
-    const nextIndexPos = this.copyIndexBlockIfOld(indexPos);
+    const nextIndexPos = this.copyIndexBlockIfOld(indexPos, frozenAt);
     this.core.seek(nextIndexPos + Slot.LENGTH * i);
     writer.write(nextSlot.toBytes());
     return new Slot(nextIndexPos, Tag.INDEX);
@@ -2348,7 +2375,8 @@ export class Database {
   // ArrayList methods
   readArrayListSlotAppend(
     header: ArrayListHeader,
-    writeMode: WriteMode
+    writeMode: WriteMode,
+    frozenAt: number
   ): ArrayListAppendResult {
     const writer = this.core.writer();
 
@@ -2367,7 +2395,7 @@ export class Database {
       indexPos = nextIndexPos;
     }
 
-    let slotPtr = this.readArrayListSlot(indexPos, key, nextShift, writeMode);
+    let slotPtr = this.readArrayListSlot(indexPos, key, nextShift, writeMode, frozenAt);
     // clear values left by a rollback or slice
     slotPtr = slotPtr.withSlot(new Slot());
     if (slotPtr.position === null) throw new CursorNotWriteableException();
@@ -2380,7 +2408,8 @@ export class Database {
     indexPos: number,
     key: number,
     shift: number,
-    writeMode: WriteMode
+    writeMode: WriteMode,
+    frozenAt: number
   ): SlotPointer {
     if (shift >= MAX_BRANCH_LENGTH) throw new MaxShiftExceededException();
 
@@ -2412,7 +2441,7 @@ export class Database {
 
             this.core.seek(slotPos);
             writer.write(new Slot(nextIndexPos, Tag.INDEX).toBytes());
-            return this.readArrayListSlot(nextIndexPos, key, shift - 1, writeMode);
+            return this.readArrayListSlot(nextIndexPos, key, shift - 1, writeMode, frozenAt);
           }
           default:
             throw new UnreachableException();
@@ -2421,7 +2450,7 @@ export class Database {
       case Tag.INDEX: {
         let nextPtr = ptr;
         if (writeMode === WriteMode.READ_WRITE) {
-          nextPtr = this.copyIndexBlockIfOld(ptr);
+          nextPtr = this.copyIndexBlockIfOld(ptr, frozenAt);
           if (nextPtr !== ptr) {
             // make slot point to the copied block
             const writer = this.core.writer();
@@ -2429,14 +2458,14 @@ export class Database {
             writer.write(new Slot(nextPtr, Tag.INDEX).toBytes());
           }
         }
-        return this.readArrayListSlot(nextPtr, key, shift - 1, writeMode);
+        return this.readArrayListSlot(nextPtr, key, shift - 1, writeMode, frozenAt);
       }
       default:
         throw new UnexpectedTagException();
     }
   }
 
-  readArrayListSlice(header: ArrayListHeader, size: number): ArrayListHeader {
+  readArrayListSlice(header: ArrayListHeader, size: number, frozenAt: number): ArrayListHeader {
     const reader = this.core.reader();
 
     if (size > header.size || size < 0) {
@@ -2461,7 +2490,7 @@ export class Database {
       }
       // the new root may still belong to a past moment. unlike child
       // nodes, root nodes are written directly, so copy it now.
-      indexPos = this.copyIndexBlockIfOld(indexPos);
+      indexPos = this.copyIndexBlockIfOld(indexPos, frozenAt);
       return new ArrayListHeader(indexPos, size);
     }
   }
@@ -2547,13 +2576,13 @@ export class Database {
   }
 
   // a node is safe to mutate in place when it was created in the current transaction
-  // (offset >= txStart), since no committed moment and no pre-concat sharing can
-  // reference it. concat advances txStart (an implicit freeze) precisely so its
-  // shared subtrees fall below it here.
-  btreeReusable(ptr: number): boolean {
+  // after the writing cursor's freeze point (see `isOld`), since no committed moment
+  // and no pre-concat sharing can reference it. concat advances txStart (an implicit
+  // freeze) precisely so its shared subtrees fall below it here.
+  btreeReusable(ptr: number, frozenAt: number): boolean {
     // nothing can be reused outside a transaction
     try {
-      return !this.isOld(ptr);
+      return !this.isOld(ptr, frozenAt);
     } catch (e) {
       if (e instanceof ExpectedTxStartException) return false;
       throw e;
@@ -2562,8 +2591,8 @@ export class Database {
 
   // write a new version of a node, reusing oldPtr's position in place if that node
   // belongs to this transaction, otherwise appending a copy
-  btreeWriteNode(node: BTreeNode, oldPtr: number): number {
-    if (this.btreeReusable(oldPtr)) {
+  btreeWriteNode(node: BTreeNode, oldPtr: number, frozenAt: number): number {
+    if (this.btreeReusable(oldPtr, frozenAt)) {
       this.writeBTreeNodeAt(node, oldPtr);
       return oldPtr;
     }
@@ -2597,7 +2626,7 @@ export class Database {
 
   // insert a placeholder slot at `rank` within the subtree at nodePtr, writing new
   // nodes along the path. the caller fills in the value at the returned valuePosition.
-  btreeInsert(nodePtr: number, rank: number): BTreeInsertResult {
+  btreeInsert(nodePtr: number, rank: number, frozenAt: number): BTreeInsertResult {
     const node = this.readBTreeNode(nodePtr);
     switch (node.kind) {
       case BTreeNodeKind.LEAF: {
@@ -2615,7 +2644,7 @@ export class Database {
         if (total <= BTREE_SLOT_COUNT) {
           const leaf = new BTreeNode(BTreeNodeKind.LEAF, total);
           for (let k = 0; k < total; k++) leaf.values[k] = vals[k];
-          const ptr = this.btreeWriteNode(leaf, nodePtr);
+          const ptr = this.btreeWriteNode(leaf, nodePtr, frozenAt);
           return new BTreeInsertResult(ptr, total, ptr + BTREE_NODE_HEADER_SIZE + r * Slot.LENGTH, null);
         }
 
@@ -2626,7 +2655,7 @@ export class Database {
         for (let k = 0; k < leftN; k++) left.values[k] = vals[k];
         const right = new BTreeNode(BTreeNodeKind.LEAF, rightN);
         for (let k = 0; k < rightN; k++) right.values[k] = vals[leftN + k];
-        const leftPtr = this.btreeWriteNode(left, nodePtr);
+        const leftPtr = this.btreeWriteNode(left, nodePtr, frozenAt);
         const rightPtr = this.writeBTreeNode(right);
         const valuePosition = r < leftN
           ? leftPtr + BTREE_NODE_HEADER_SIZE + r * Slot.LENGTH
@@ -2641,7 +2670,7 @@ export class Database {
           rem -= node.counts[i];
           i++;
         }
-        const child = this.btreeInsert(Number(node.children[i].value), rem);
+        const child = this.btreeInsert(Number(node.children[i].value), rem, frozenAt);
 
         // rebuild this branch with the (possibly split) child
         const children: Slot[] = [];
@@ -2665,7 +2694,7 @@ export class Database {
             branch.children[k] = children[k];
             branch.counts[k] = counts[k];
           }
-          const ptr = this.btreeWriteNode(branch, nodePtr);
+          const ptr = this.btreeWriteNode(branch, nodePtr, frozenAt);
           return new BTreeInsertResult(ptr, branch.subtreeCount(), child.valuePosition, null);
         }
 
@@ -2682,7 +2711,7 @@ export class Database {
           right.children[k] = children[leftN + k];
           right.counts[k] = counts[leftN + k];
         }
-        const leftPtr = this.btreeWriteNode(left, nodePtr);
+        const leftPtr = this.btreeWriteNode(left, nodePtr, frozenAt);
         const rightPtr = this.writeBTreeNode(right);
         return new BTreeInsertResult(
           leftPtr,
@@ -2705,11 +2734,11 @@ export class Database {
   // that belong to a past transaction. the element count is unchanged, so when the
   // whole path is already this-transaction nothing is rewritten and the caller writes
   // straight into the existing leaf.
-  btreeGetForWrite(nodePtr: number, rank: number): BTreeWriteSlot {
+  btreeGetForWrite(nodePtr: number, rank: number, frozenAt: number): BTreeWriteSlot {
     const node = this.readBTreeNode(nodePtr);
     switch (node.kind) {
       case BTreeNodeKind.LEAF: {
-        const newPtr = this.btreeReusable(nodePtr) ? nodePtr : this.writeBTreeNode(node);
+        const newPtr = this.btreeReusable(nodePtr, frozenAt) ? nodePtr : this.writeBTreeNode(node);
         return new BTreeWriteSlot(newPtr, newPtr + BTREE_NODE_HEADER_SIZE + rank * Slot.LENGTH, node.values[rank]);
       }
       case BTreeNodeKind.BRANCH: {
@@ -2720,13 +2749,13 @@ export class Database {
           i++;
         }
         const childPtr = Number(node.children[i].value);
-        const child = this.btreeGetForWrite(childPtr, rem);
+        const child = this.btreeGetForWrite(childPtr, rem, frozenAt);
         // if the child stayed put, this branch is unchanged too
         if (child.nodePtr === childPtr) {
           return new BTreeWriteSlot(nodePtr, child.valuePosition, child.slot);
         }
         node.children[i] = new Slot(child.nodePtr, Tag.INDEX);
-        const newPtr = this.btreeWriteNode(node, nodePtr);
+        const newPtr = this.btreeWriteNode(node, nodePtr, frozenAt);
         return new BTreeWriteSlot(newPtr, child.valuePosition, child.slot);
       }
     }
@@ -2737,7 +2766,7 @@ export class Database {
   // left behind for the caller to write. an emptied child is dropped and a child left
   // under half full is merged with a neighbor it fits with, so every leaf stays at the
   // same depth.
-  btreeRemove(nodePtr: number, rank: number): BTreeNode {
+  btreeRemove(nodePtr: number, rank: number, frozenAt: number): BTreeNode {
     const node = this.readBTreeNode(nodePtr);
     switch (node.kind) {
       case BTreeNodeKind.LEAF: {
@@ -2754,7 +2783,7 @@ export class Database {
           i++;
         }
         const childPtr = Number(node.children[i].value);
-        let child = this.btreeRemove(childPtr, rem);
+        let child = this.btreeRemove(childPtr, rem, frozenAt);
         if (child.num === 0) {
           btreeDropChild(node, i);
           return node;
@@ -2769,7 +2798,7 @@ export class Database {
             i = first;
           }
         }
-        node.children[i] = new Slot(this.btreeWriteNode(child, childPtr), Tag.INDEX);
+        node.children[i] = new Slot(this.btreeWriteNode(child, childPtr, frozenAt), Tag.INDEX);
         node.counts[i] = child.subtreeCount();
         break;
       }
@@ -3071,8 +3100,8 @@ export class Database {
 
   // reuse oldPtr's position in place when it belongs to this transaction
   // (mirrors btreeWriteNode / the txStart path-copying model)
-  sortedWriteNode(node: SortedNode, oldPtr: number): number {
-    if (this.btreeReusable(oldPtr)) {
+  sortedWriteNode(node: SortedNode, oldPtr: number, frozenAt: number): number {
+    if (this.btreeReusable(oldPtr, frozenAt)) {
       this.writeSortedNodeAt(node, oldPtr);
       return oldPtr;
     }
@@ -3232,7 +3261,7 @@ export class Database {
   // insert key (or locate it for replacement) within the subtree at nodePtr,
   // path-copying nodes and maintaining separators + counts. the caller writes the value
   // of the returned entry.
-  sortedPut(nodePtr: number, key: Uint8Array): SortedInsertResult {
+  sortedPut(nodePtr: number, key: Uint8Array, frozenAt: number): SortedInsertResult {
     const node = this.readSortedNode(nodePtr);
     switch (node.kind) {
       case BTreeNodeKind.LEAF: {
@@ -3251,11 +3280,11 @@ export class Database {
           // belongs to a past moment
           const leaf = node;
           let kvSlot = node.entries[idx];
-          if (!this.btreeReusable(Number(kvSlot.value))) {
+          if (!this.btreeReusable(Number(kvSlot.value), frozenAt)) {
             kvSlot = this.writeKvPair(kvSlot.tag, this.readKvPair(kvSlot));
             leaf.entries[idx] = kvSlot;
           }
-          const ptr = this.sortedWriteNode(leaf, nodePtr);
+          const ptr = this.sortedWriteNode(leaf, nodePtr, frozenAt);
           return new SortedInsertResult(ptr, node.num, kvSlot, false, null);
         }
 
@@ -3270,7 +3299,7 @@ export class Database {
         if (total <= BTREE_SLOT_COUNT) {
           const leaf = new SortedNode(BTreeNodeKind.LEAF, total);
           for (let k = 0; k < total; k++) leaf.entries[k] = entries[k];
-          const ptr = this.sortedWriteNode(leaf, nodePtr);
+          const ptr = this.sortedWriteNode(leaf, nodePtr, frozenAt);
           return new SortedInsertResult(ptr, total, entry.kvSlot, true, null);
         }
 
@@ -3283,14 +3312,14 @@ export class Database {
         const right = new SortedNode(BTreeNodeKind.LEAF, rightN);
         for (let k = 0; k < rightN; k++) right.entries[k] = entries[leftN + k];
         const separator = this.readKvPair(entries[leftN]).keySlot;
-        const leftPtr = this.sortedWriteNode(left, nodePtr);
+        const leftPtr = this.sortedWriteNode(left, nodePtr, frozenAt);
         const rightPtr = this.writeSortedNode(right);
         return new SortedInsertResult(leftPtr, leftN, entry.kvSlot, true, new SortedSplit(rightPtr, rightN, separator));
       }
       case BTreeNodeKind.BRANCH: {
         let i = 0;
         while (i + 1 < node.num && this.compareKey(node.separators[i + 1], key) <= 0) i++;
-        const child = this.sortedPut(Number(node.children[i].value), key);
+        const child = this.sortedPut(Number(node.children[i].value), key, frozenAt);
 
         const children: Slot[] = [];
         const separators: Slot[] = [];
@@ -3317,7 +3346,7 @@ export class Database {
             branch.separators[k] = separators[k];
             branch.counts[k] = counts[k];
           }
-          const ptr = this.sortedWriteNode(branch, nodePtr);
+          const ptr = this.sortedWriteNode(branch, nodePtr, frozenAt);
           return new SortedInsertResult(ptr, branch.subtreeCount(), child.kvSlot, child.added, null);
         }
 
@@ -3338,7 +3367,7 @@ export class Database {
           right.counts[k] = counts[leftN + k];
         }
         const separator = separators[leftN];
-        const leftPtr = this.sortedWriteNode(left, nodePtr);
+        const leftPtr = this.sortedWriteNode(left, nodePtr, frozenAt);
         const rightPtr = this.writeSortedNode(right);
         return new SortedInsertResult(
           leftPtr,
@@ -3354,7 +3383,7 @@ export class Database {
 
   // remove key from the subtree at nodePtr, path-copying nodes and decrementing counts.
   // an emptied leaf is left in place (see SortedRemoveResult).
-  sortedRemove(nodePtr: number, key: Uint8Array): SortedRemoveResult {
+  sortedRemove(nodePtr: number, key: Uint8Array, frozenAt: number): SortedRemoveResult {
     const node = this.readSortedNode(nodePtr);
     switch (node.kind) {
       case BTreeNodeKind.LEAF: {
@@ -3371,19 +3400,19 @@ export class Database {
         const leaf = new SortedNode(BTreeNodeKind.LEAF, node.num - 1);
         for (let k = 0; k < idx; k++) leaf.entries[k] = node.entries[k];
         for (let k = idx; k < node.num - 1; k++) leaf.entries[k] = node.entries[k + 1];
-        const ptr = this.sortedWriteNode(leaf, nodePtr);
+        const ptr = this.sortedWriteNode(leaf, nodePtr, frozenAt);
         return new SortedRemoveResult(ptr, true);
       }
       case BTreeNodeKind.BRANCH: {
         let i = 0;
         while (i + 1 < node.num && this.compareKey(node.separators[i + 1], key) <= 0) i++;
-        const child = this.sortedRemove(Number(node.children[i].value), key);
+        const child = this.sortedRemove(Number(node.children[i].value), key, frozenAt);
         if (!child.found) return new SortedRemoveResult(nodePtr, false);
 
         const branch = node;
         branch.children[i] = new Slot(child.nodePtr, Tag.INDEX);
         branch.counts[i] -= 1;
-        const ptr = this.sortedWriteNode(branch, nodePtr);
+        const ptr = this.sortedWriteNode(branch, nodePtr, frozenAt);
         return new SortedRemoveResult(ptr, true);
       }
     }

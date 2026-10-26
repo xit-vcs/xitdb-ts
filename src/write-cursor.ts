@@ -35,8 +35,8 @@ export class WriteKeyValuePairCursor extends KeyValuePairCursor {
 export class WriteCursor extends ReadCursor {
   private readonly transaction: Transaction | null;
 
-  constructor(slotPtr: SlotPointer, db: Database, transaction: Transaction | null = db.transaction) {
-    super(slotPtr, db);
+  constructor(slotPtr: SlotPointer, db: Database, transaction: Transaction | null = db.transaction, frozenAt: number = 0) {
+    super(slotPtr, db, frozenAt);
     this.transaction = Database.isRoot(slotPtr) ? null : transaction;
   }
 
@@ -54,7 +54,7 @@ export class WriteCursor extends ReadCursor {
   }
 
   override resolvedCursor(): WriteCursor {
-    return new WriteCursor(this.resolved(), this.db, this.transaction);
+    return new WriteCursor(this.resolved(), this.db, this.transaction, this.frozenAt);
   }
 
   slot(): Slot {
@@ -65,9 +65,9 @@ export class WriteCursor extends ReadCursor {
     return super.slot();
   }
 
-  // reload after freezing because copy-on-write may change where the slot points
+  // reload because an earlier write may have moved what the slot points to
   private reloadSlot(): void {
-    if (this.transaction !== null && this.transaction.frozenAt !== null && this.slotPtr.position !== null) {
+    if (this.transaction !== null && this.slotPtr.position !== null) {
       this.db.core.seek(this.slotPtr.position);
       const bytes = new Uint8Array(Slot.LENGTH);
       this.db.core.reader().readFully(bytes);
@@ -87,7 +87,7 @@ export class WriteCursor extends ReadCursor {
       let slotPtr: SlotPointer;
       try {
         this.reloadSlot();
-        slotPtr = this.db.readSlotPointer(WriteMode.READ_WRITE, path, 0, this.slotPtr);
+        slotPtr = this.db.readSlotPointer(WriteMode.READ_WRITE, path, 0, this.slotPtr, this.frozenAt);
       } catch (e) {
         if (startsTransaction && this.db.transaction !== null) this.db.transaction.aborted = true;
         // only truncate when the error escapes the outer write.
@@ -103,12 +103,24 @@ export class WriteCursor extends ReadCursor {
         this.db.core.sync();
       }
       this.reloadSlot();
-      const cursor = new WriteCursor(slotPtr, this.db);
+      const cursor = new WriteCursor(slotPtr, this.db, this.db.transaction, this.frozenAt);
       cursor.reloadSlot();
       return cursor;
     } finally {
       if (startsTransaction) this.db.transaction = null;
     }
+  }
+
+  /**
+   * makes writes through this cursor, and cursors made from it afterward,
+   * copy what the transaction wrote so far instead of changing it in
+   * place. call it after pointing this slot at data still referred to
+   * elsewhere, and before wrapping the cursor in a collection, which keeps
+   * its own copy. unlike `Database.freeze`, other cursors keep writing in place.
+   */
+  freeze(): void {
+    if (this.db.txStart === null) throw new ExpectedTxStartException();
+    this.frozenAt = this.db.core.length();
   }
 
   write(data: WriteableData | null): void {
@@ -126,8 +138,8 @@ export class WriteCursor extends ReadCursor {
   override readKeyValuePair(): WriteKeyValuePairCursor {
     const kvPairCursor = super.readKeyValuePair();
     return new WriteKeyValuePairCursor(
-      new WriteCursor(kvPairCursor.valueCursor.slotPtr, this.db, this.transaction),
-      new WriteCursor(kvPairCursor.keyCursor.slotPtr, this.db, this.transaction),
+      new WriteCursor(kvPairCursor.valueCursor.slotPtr, this.db, this.transaction, this.frozenAt),
+      new WriteCursor(kvPairCursor.keyCursor.slotPtr, this.db, this.transaction, this.frozenAt),
       kvPairCursor.hash
     );
   }

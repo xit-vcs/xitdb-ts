@@ -255,7 +255,7 @@ To show how to fix this, let's first undo the transaction we just made. Here we 
 history.append(history.getSlot(historyIndex)!);
 ```
 
-This time, after making the "big cities" list, we call `freeze`, which tells xitdb to consider all data made so far in the transaction to be immutable. After that, we can clone it into the "cities" list and it will work the way we wanted:
+This time, after cloning "big cities" into the "cities" list, we call `freeze` on the cursor. This tells xitdb that writes through that cursor must treat all data made so far in the transaction as immutable, so they copy it instead of changing it. Writes through other cursors aren't affected. Now it works the way we wanted:
 
 ```typescript
 history.appendContext(history.getSlot(-1), (cursor) => {
@@ -266,13 +266,15 @@ history.appendContext(history.getSlot(-1), (cursor) => {
   bigCities.append(new Bytes('New York, NY'));
   bigCities.append(new Bytes('Los Angeles, CA'));
 
-  // freeze here, so big-cities won't be mutated
-  cursor.db.freeze();
-
   // create a new key called "cities" whose initial value is
   // based on the "big-cities" list
   const citiesCursor = moment.putCursor('cities');
   citiesCursor.write(bigCities.slot());
+
+  // freeze here, so writes to cities won't mutate big-cities
+  // note: you can also freeze globally with `cursor.db.freeze()`,
+  // but call it before `putCursor` creates the cities cursor
+  citiesCursor.freeze();
 
   const cities = new WriteArrayList(citiesCursor);
   cities.append(new Bytes('Charleston, SC'));

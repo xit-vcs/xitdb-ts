@@ -828,12 +828,14 @@ function testHighLevelApi(core: Core, hasher: Hasher, filePath: string | null): 
       bigCities.append(new Bytes('New York, NY'));
       bigCities.append(new Bytes('Los Angeles, CA'));
 
-      // freeze here, so big-cities won't be mutated
-      cursor.db.freeze();
-
       // create a new key called "cities" whose initial value is based on the "big-cities" list
       const citiesCursor = moment.putCursor('cities');
       citiesCursor.write(bigCities.slot());
+
+      // freeze here, so writes to cities won't mutate big-cities
+      // note: you can also freeze globally with `cursor.db.freeze()`,
+      // but call it before `putCursor` creates the cities cursor
+      citiesCursor.freeze();
 
       const cities = new WriteArrayList(citiesCursor);
       cities.append(new Bytes('Charleston, SC'));
