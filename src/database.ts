@@ -1016,10 +1016,18 @@ export class LinkedArrayListRemove implements PathPartBase {
     }
     const rank = index < 0 ? header.size - Math.abs(index) : index;
 
-    // remove = join the parts before and after the removed element
-    const before = db.btreeSplit(header.rootPtr, rank);
-    const after = db.btreeSplit(before.right, 1);
-    const newRootPtr = db.btreeJoin(before.left, after.right);
+    let newRootPtr: number;
+    if (header.size === 1) {
+      newRootPtr = db.btreeNewRoot();
+    } else {
+      let root = db.btreeRemove(header.rootPtr, rank);
+      newRootPtr = db.btreeWriteNode(root, header.rootPtr);
+      // a root left with one child is replaced by it
+      while (root.kind === BTreeNodeKind.BRANCH && root.num === 1) {
+        newRootPtr = Number(root.children[0].value);
+        root = db.readBTreeNode(newRootPtr);
+      }
+    }
 
     // update the header before recursing into the rest of the path, so that a
     // failure there leaves the tree and header consistent
@@ -1544,6 +1552,33 @@ function bigIntShiftRight(value: Uint8Array, bits: number): bigint {
     result = (result << 8n) | BigInt(value[i]);
   }
   return result >> BigInt(bits);
+}
+
+function btreeDropChild(branch: BTreeNode, i: number): void {
+  for (let k = i; k + 1 < branch.num; k++) {
+    branch.children[k] = branch.children[k + 1];
+    branch.counts[k] = branch.counts[k + 1];
+  }
+  branch.num--;
+  branch.children[branch.num] = new Slot();
+  branch.counts[branch.num] = 0;
+}
+
+// two nodes of the same kind whose entries fit in one node, a before b
+function btreeConcatNodes(a: BTreeNode, b: BTreeNode): BTreeNode {
+  switch (a.kind) {
+    case BTreeNodeKind.LEAF:
+      for (let k = 0; k < b.num; k++) a.values[a.num + k] = b.values[k];
+      break;
+    case BTreeNodeKind.BRANCH:
+      for (let k = 0; k < b.num; k++) {
+        a.children[a.num + k] = b.children[k];
+        a.counts[a.num + k] = b.counts[k];
+      }
+      break;
+  }
+  a.num += b.num;
+  return a;
 }
 
 export class Transaction {
@@ -2698,6 +2733,50 @@ export class Database {
     throw new UnreachableException();
   }
 
+  // remove the element at `rank` within the subtree at nodePtr, returning the node
+  // left behind for the caller to write. an emptied child is dropped and a child left
+  // under half full is merged with a neighbor it fits with, so every leaf stays at the
+  // same depth.
+  btreeRemove(nodePtr: number, rank: number): BTreeNode {
+    const node = this.readBTreeNode(nodePtr);
+    switch (node.kind) {
+      case BTreeNodeKind.LEAF: {
+        for (let k = rank; k + 1 < node.num; k++) node.values[k] = node.values[k + 1];
+        node.num--;
+        node.values[node.num] = new Slot();
+        break;
+      }
+      case BTreeNodeKind.BRANCH: {
+        let i = 0;
+        let rem = rank;
+        while (i + 1 < node.num && rem >= node.counts[i]) {
+          rem -= node.counts[i];
+          i++;
+        }
+        const childPtr = Number(node.children[i].value);
+        let child = this.btreeRemove(childPtr, rem);
+        if (child.num === 0) {
+          btreeDropChild(node, i);
+          return node;
+        }
+        if (child.num < BTREE_SPLIT_COUNT && node.num > 1) {
+          // the pair is i and its right neighbor, or its left one if it is last
+          const first = i + 1 < node.num ? i : i - 1;
+          const neighbor = this.readBTreeNode(Number(node.children[first === i ? i + 1 : first].value));
+          if (child.num + neighbor.num <= BTREE_SLOT_COUNT) {
+            child = first === i ? btreeConcatNodes(child, neighbor) : btreeConcatNodes(neighbor, child);
+            btreeDropChild(node, first + 1);
+            i = first;
+          }
+        }
+        node.children[i] = new Slot(this.btreeWriteNode(child, childPtr), Tag.INDEX);
+        node.counts[i] = child.subtreeCount();
+        break;
+      }
+    }
+    return node;
+  }
+
   // join (concat): a true O(log n), structure-sharing concatenation of two trees where
   // every element of `a` precedes every element of `b`. unlike the rebuild helpers
   // above, untouched subtrees are shared by pointer, so concatenating a list with
@@ -2860,9 +2939,9 @@ export class Database {
     return this.btreeMakeRoot(result);
   }
 
-  // split (used by slice and remove): a true O(log n), structure-sharing split of a
-  // tree into [0, rank) and [rank, size). partial nodes along the path are reassembled
-  // with join, so the result trees stay balanced.
+  // split (used by slice): a true O(log n), structure-sharing split of a tree into
+  // [0, rank) and [rank, size). partial nodes along the path are reassembled with
+  // join, so the result trees stay balanced.
 
   // build a tree from a run of sibling children (already height-h-1 subtrees): empty ->
   // a new empty leaf, one -> that child unwrapped, many -> a branch
