@@ -154,6 +154,9 @@ export const ROOT_HEADER_START = Header.LENGTH;
 
 // rewritten at every commit, as a cache of the latest trailer. the root slot
 // comes first on disk.
+// we only read `fileSize`, which lets us read the trailer. other xitdb
+// implementations may read the whole header to avoid that extra read,
+// but that increases the risk of a concurrent commit tearing it.
 export class RootHeader {
   static readonly LENGTH = Slot.LENGTH + 8;
 
@@ -175,6 +178,7 @@ export class RootHeader {
 }
 
 export const ROOT_HEADER_END = ROOT_HEADER_START + RootHeader.LENGTH;
+const ROOT_HEADER_FILE_SIZE_START = ROOT_HEADER_START + Slot.LENGTH;
 
 // appended at the end of every transaction, so the committed bytes (up to the
 // root header's `fileSize`) always end with one. the root slot comes first on
@@ -1881,15 +1885,7 @@ export class Database {
    * change except for the root header (see `readCommitted`).
    */
   committedSize(): number {
-    const header = this.readRootHeader();
-    const minimumSize = ROOT_HEADER_END + RootTrailer.LENGTH;
-    if (header.fileSize < minimumSize) throw new InvalidDatabaseException();
-    if (this.core.length() < header.fileSize) throw new TruncatedDatabaseException();
-    // the committed bytes must end with a trailer matching the header
-    if (!this.readRootTrailer(header.fileSize).root.equals(header.root)) {
-      throw new InvalidDatabaseException();
-    }
-    return header.fileSize;
+    return this.readRootHeader().fileSize;
   }
 
   truncate(): void {
@@ -1908,11 +1904,15 @@ export class Database {
     }
   }
 
+  // the file size from the root header, and the root slot from the trailer it points to
   readRootHeader(): RootHeader {
-    this.core.seek(ROOT_HEADER_START);
-    const bytes = new Uint8Array(RootHeader.LENGTH);
-    this.core.reader().readFully(bytes);
-    return RootHeader.fromBytes(bytes);
+    this.core.seek(ROOT_HEADER_FILE_SIZE_START);
+    const fileSize = this.core.reader().readLong();
+    const minimumSize = ROOT_HEADER_END + RootTrailer.LENGTH;
+    if (fileSize < minimumSize) throw new InvalidDatabaseException();
+    if (this.core.length() < fileSize) throw new TruncatedDatabaseException();
+    // the committed bytes must end with a trailer
+    return new RootHeader(fileSize, this.readRootTrailer(fileSize).root);
   }
 
   // the most recently committed root slot

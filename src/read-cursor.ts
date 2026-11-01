@@ -24,7 +24,6 @@ import {
   InvalidOffsetException,
   KeyNotFoundException,
   ExpectedUnsignedLongException,
-  InvalidDatabaseException,
 } from './exceptions.js';
 import { Bytes } from './writeable-data.js';
 
@@ -64,7 +63,6 @@ export class ReadCursor implements Slotted {
   resolved(): SlotPointer {
     if (Database.isRoot(this.slotPtr)) {
       const header = this.db.readRootHeader();
-      if (header.fileSize < RootTrailer.LENGTH) throw new InvalidDatabaseException();
       // the root slot is the first thing in the trailer
       return new SlotPointer(header.fileSize - RootTrailer.LENGTH, header.root);
     }
