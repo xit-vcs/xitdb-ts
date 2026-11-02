@@ -78,7 +78,6 @@ export {
   SortedInsertResult,
   SortedRemoveResult,
   SortedSlot,
-  SortedEntry,
   VERSION,
   MAGIC_NUMBER,
   BIT_COUNT,

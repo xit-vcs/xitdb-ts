@@ -6,7 +6,8 @@ import { SortedMapGet, SortedMapGetKey, SortedMapGetIndex, BTreeHeader } from '.
 import { UnexpectedTagException } from './exceptions.js';
 import { Bytes } from './writeable-data.js';
 
-// a sorted set of byte-string keys (a SortedMap with no values).
+// a sorted set of byte-string keys (a SortedMap with no values). keys are
+// stored directly in the leaves, which avoids a key-value pair per entry.
 export class ReadSortedSet implements Slotted {
   public cursor!: ReadCursor;
 

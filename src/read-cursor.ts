@@ -8,7 +8,8 @@ import {
   ArrayListHeader,
   BTreeHeader,
   type PathPart,
-  kvKeyOffset,
+  kvKeyPosition,
+  kvValuePosition,
   RootTrailer,
   ArrayListGet,
   INDEX_BLOCK_SIZE,
@@ -198,12 +199,11 @@ export class ReadCursor implements Slotted {
   readKeyValuePair(): KeyValuePairCursor {
     const slotPtr = this.resolved();
     const kvPair = this.db.readKvPair(slotPtr.slot);
-    const keySlotPos = Number(slotPtr.slot.value) + kvKeyOffset(slotPtr.slot.tag, this.db.header.hashSize);
-    const valueSlotPos = keySlotPos + Slot.LENGTH;
+    const hashSize = this.db.header.hashSize;
 
     return new KeyValuePairCursor(
-      new ReadCursor(new SlotPointer(valueSlotPos, kvPair.valueSlot), this.db, this.frozenAt),
-      new ReadCursor(new SlotPointer(keySlotPos, kvPair.keySlot), this.db, this.frozenAt),
+      new ReadCursor(new SlotPointer(kvValuePosition(slotPtr.slot, hashSize), kvPair.valueSlot), this.db, this.frozenAt),
+      new ReadCursor(new SlotPointer(kvKeyPosition(slotPtr.slot, hashSize), kvPair.keySlot), this.db, this.frozenAt),
       kvPair.hash
     );
   }
