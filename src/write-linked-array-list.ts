@@ -10,6 +10,8 @@ import {
   LinkedArrayListInsert,
   LinkedArrayListRemove,
   WriteData,
+  Context,
+  type ContextFunction,
 } from './database.js';
 import type { WriteableData } from './writeable-data.js';
 
@@ -47,6 +49,14 @@ export class WriteLinkedArrayList extends ReadLinkedArrayList {
 
   appendCursor(): WriteCursor {
     return (this.cursor as WriteCursor).writePath([new LinkedArrayListAppend()]);
+  }
+
+  appendContext(data: WriteableData | null, fn: ContextFunction): void {
+    (this.cursor as WriteCursor).writePath([
+      new LinkedArrayListAppend(),
+      new WriteData(data),
+      new Context(fn),
+    ]);
   }
 
   slice(offset: number, size: number): void {
