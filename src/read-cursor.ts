@@ -618,23 +618,13 @@ export class CursorIterator {
       const node = cursor.db.readSortedNode(nodePtr);
       const position = nodePtr + BTREE_NODE_HEADER_SIZE;
       if (node.kind === BTreeNodeKind.LEAF) {
-        let li = node.num;
-        for (let j = 0; j < node.num; j++) {
-          const kv = cursor.db.readKvPair(node.entries[j]);
-          if (cursor.db.compareKey(kv.keySlot, key) >= 0) {
-            li = j;
-            break;
-          }
-        }
+        const li = cursor.db.sortedLeafSearch(node, key).index;
         before += li;
         stack.push(new IteratorLevel(position, node.entries, li));
         return { stack, before };
       } else {
-        let i = 0;
-        while (i + 1 < node.num && cursor.db.compareKey(node.separators[i + 1], key) <= 0) {
-          before += node.counts[i];
-          i++;
-        }
+        const i = cursor.db.sortedBranchSearch(node, key);
+        for (let k = 0; k < i; k++) before += node.counts[k];
         stack.push(new IteratorLevel(position, node.children, i));
         nodePtr = Number(node.children[i].value);
       }

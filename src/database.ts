@@ -474,6 +474,10 @@ export class SortedSlot {
   constructor(public slot: Slot, public position: number) {}
 }
 
+export class SortedLeafSearch {
+  constructor(public index: number, public found: boolean) {}
+}
+
 // PathPart types (discriminated union)
 export type PathPart =
   | ArrayListInit
@@ -3178,23 +3182,48 @@ export class Database {
     }
   }
 
+  // binary search for the child whose subtree may contain key: the last child whose
+  // separator is <= key, or the first child if there is none. separators[0] is an
+  // unused sentinel, so it is never compared.
+  sortedBranchSearch(node: SortedNode, key: Uint8Array): number {
+    let lo = 1;
+    let hi = node.num;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.compareKey(node.separators[mid], key) <= 0) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo - 1;
+  }
+
+  // binary search for key among a leaf's entries. if it isn't found, the index is where
+  // it would be inserted. since keys are unique, the index is the number of entries
+  // less than key either way.
+  sortedLeafSearch(node: SortedNode, key: Uint8Array): SortedLeafSearch {
+    let lo = 0;
+    let hi = node.num;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      const kv = this.readKvPair(node.entries[mid]);
+      const cmp = this.compareKey(kv.keySlot, key);
+      if (cmp === 0) return new SortedLeafSearch(mid, true);
+      if (cmp < 0) lo = mid + 1;
+      else hi = mid;
+    }
+    return new SortedLeafSearch(lo, false);
+  }
+
   // descend by key to the matching leaf entry, or null
   sortedGet(rootPtr: number, key: Uint8Array): SortedSlot | null {
     let nodePtr = rootPtr;
     while (true) {
       const node = this.readSortedNode(nodePtr);
       if (node.kind === BTreeNodeKind.LEAF) {
-        for (let i = 0; i < node.num; i++) {
-          const entry = node.entries[i];
-          const kv = this.readKvPair(entry);
-          const cmp = this.compareKey(kv.keySlot, key);
-          if (cmp === 0) return new SortedSlot(entry, nodePtr + BTREE_NODE_HEADER_SIZE + i * Slot.LENGTH);
-          if (cmp > 0) return null;
-        }
-        return null;
+        const search = this.sortedLeafSearch(node, key);
+        if (!search.found) return null;
+        return new SortedSlot(node.entries[search.index], nodePtr + BTREE_NODE_HEADER_SIZE + search.index * Slot.LENGTH);
       } else {
-        let i = 0;
-        while (i + 1 < node.num && this.compareKey(node.separators[i + 1], key) <= 0) i++;
+        const i = this.sortedBranchSearch(node, key);
         nodePtr = Number(node.children[i].value);
       }
     }
@@ -3227,18 +3256,10 @@ export class Database {
     while (true) {
       const node = this.readSortedNode(nodePtr);
       if (node.kind === BTreeNodeKind.LEAF) {
-        for (let i = 0; i < node.num; i++) {
-          const kv = this.readKvPair(node.entries[i]);
-          if (this.compareKey(kv.keySlot, key) < 0) rank += 1;
-          else break;
-        }
-        return rank;
+        return rank + this.sortedLeafSearch(node, key).index;
       } else {
-        let i = 0;
-        while (i + 1 < node.num && this.compareKey(node.separators[i + 1], key) <= 0) {
-          rank += node.counts[i];
-          i++;
-        }
+        const i = this.sortedBranchSearch(node, key);
+        for (let k = 0; k < i; k++) rank += node.counts[k];
         nodePtr = Number(node.children[i].value);
       }
     }
@@ -3281,16 +3302,10 @@ export class Database {
     switch (node.kind) {
       case BTreeNodeKind.LEAF: {
         // find the matching or insertion index
-        let idx = node.num;
-        let found = false;
-        for (let i = 0; i < node.num; i++) {
-          const kv = this.readKvPair(node.entries[i]);
-          const cmp = this.compareKey(kv.keySlot, key);
-          if (cmp === 0) { idx = i; found = true; break; }
-          if (cmp > 0) { idx = i; break; }
-        }
+        const search = this.sortedLeafSearch(node, key);
+        const idx = search.index;
 
-        if (found) {
+        if (search.found) {
           if (keyOnly) return new SortedInsertResult(nodePtr, node.num, node.entries[idx], false, null);
 
           // replace: return a writable value slot, moving a key-only entry into a pair
@@ -3337,8 +3352,7 @@ export class Database {
         return new SortedInsertResult(leftPtr, leftN, entry, true, new SortedSplit(rightPtr, rightN, separator));
       }
       case BTreeNodeKind.BRANCH: {
-        let i = 0;
-        while (i + 1 < node.num && this.compareKey(node.separators[i + 1], key) <= 0) i++;
+        const i = this.sortedBranchSearch(node, key);
         const child = this.sortedPut(Number(node.children[i].value), key, keyOnly, frozenAt);
         // nothing below changed, so don't copy this node for no reason
         if (!child.added && child.nodePtr === Number(node.children[i].value)) {
@@ -3411,15 +3425,9 @@ export class Database {
     const node = this.readSortedNode(nodePtr);
     switch (node.kind) {
       case BTreeNodeKind.LEAF: {
-        let idx = node.num;
-        let found = false;
-        for (let i = 0; i < node.num; i++) {
-          const kv = this.readKvPair(node.entries[i]);
-          const cmp = this.compareKey(kv.keySlot, key);
-          if (cmp === 0) { idx = i; found = true; break; }
-          if (cmp > 0) break;
-        }
-        if (!found) return new SortedRemoveResult(nodePtr, false);
+        const search = this.sortedLeafSearch(node, key);
+        if (!search.found) return new SortedRemoveResult(nodePtr, false);
+        const idx = search.index;
 
         const leaf = new SortedNode(BTreeNodeKind.LEAF, node.num - 1);
         for (let k = 0; k < idx; k++) leaf.entries[k] = node.entries[k];
@@ -3428,8 +3436,7 @@ export class Database {
         return new SortedRemoveResult(ptr, true);
       }
       case BTreeNodeKind.BRANCH: {
-        let i = 0;
-        while (i + 1 < node.num && this.compareKey(node.separators[i + 1], key) <= 0) i++;
+        const i = this.sortedBranchSearch(node, key);
         const child = this.sortedRemove(Number(node.children[i].value), key, frozenAt);
         if (!child.found) return new SortedRemoveResult(nodePtr, false);
 
