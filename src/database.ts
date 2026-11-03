@@ -470,10 +470,6 @@ export class SortedRemoveResult {
   constructor(public nodePtr: number, public found: boolean) {}
 }
 
-export class SortedSlot {
-  constructor(public slot: Slot, public position: number) {}
-}
-
 export class SortedLeafSearch {
   constructor(public index: number, public found: boolean) {}
 }
@@ -822,7 +818,7 @@ export class LinkedArrayListGet implements PathPartBase {
     const rank = index < 0 ? header.size - Math.abs(index) : index;
 
     if (writeMode === WriteMode.READ_ONLY) {
-      const finalSlotPtr = db.readBTreeSlot(header.rootPtr, rank);
+      const finalSlotPtr = db.descendByRank(header.rootPtr, rank, BTREE_BRANCH_BLOCK_SIZE);
       return db.readSlotPointer(writeMode, path, pathI + 1, finalSlotPtr, frozenAt);
     } else {
       // path-copy down to the value slot so the write is persistent
@@ -1349,9 +1345,9 @@ export class SortedMapGet implements PathPartBase {
     const header = BTreeHeader.fromBytes(headerBytes);
 
     if (writeMode === WriteMode.READ_ONLY) {
-      const found = db.sortedGet(header.rootPtr, key);
-      if (found === null) throw new KeyNotFoundException();
-      const targetSlot = db.sortedTargetSlot(found.slot, this.target);
+      const entry = db.sortedGet(header.rootPtr, key);
+      if (entry === null) throw new KeyNotFoundException();
+      const targetSlot = db.sortedTargetSlot(entry, this.target);
       return db.readSlotPointer(writeMode, path, pathI + 1, targetSlot, frozenAt);
     } else {
       // only a set that is just touching the key can leave out the value
@@ -1409,9 +1405,8 @@ export class SortedMapGetIndex implements PathPartBase {
     }
     const rank = index < 0 ? header.size - Math.abs(index) : index;
 
-    const found = db.sortedGetByIndex(header.rootPtr, rank);
     // return the entry so the caller can read key and value
-    const targetSlot = new SlotPointer(found.position, found.slot);
+    const targetSlot = db.descendByRank(header.rootPtr, rank, SORTED_BRANCH_BLOCK_SIZE);
     return db.readSlotPointer(writeMode, path, pathI + 1, targetSlot, frozenAt);
   }
 }
@@ -2615,24 +2610,49 @@ export class Database {
     return this.writeBTreeNode(new BTreeNode(BTreeNodeKind.LEAF, 0));
   }
 
-  // descend to the value slot at the given rank (0-based), returning a pointer to it
-  // (its file position and current slot).
-  readBTreeSlot(rootPtr: number, rank: number): SlotPointer {
+  // descend to the slot at the given rank (0-based), decoding only the counts and slot
+  // needed from each node. linked array lists and sorted maps/sets share this because
+  // their leaves are identical and their branches start with the children and end with
+  // the counts, so only the size differs.
+  descendByRank(rootPtr: number, rank: number, branchBlockSize: number): SlotPointer {
+    const countsPos = branchBlockSize - BTREE_SLOT_COUNT * 8;
+    const block = new Uint8Array(branchBlockSize);
+    const view = new DataView(block.buffer);
+    const reader = this.core.reader();
+    const length = this.core.length();
     let nodePtr = rootPtr;
     let rem = rank;
     while (true) {
-      const node = this.readBTreeNode(nodePtr);
-      if (node.kind === BTreeNodeKind.LEAF) {
-        const position = nodePtr + BTREE_NODE_HEADER_SIZE + rem * Slot.LENGTH;
-        return new SlotPointer(position, node.values[rem]);
+      // a leaf may be at the end of the db, so there may not be a whole branch's
+      // worth of bytes to read
+      const size = Math.min(branchBlockSize, length - nodePtr);
+      if (size < BTREE_LEAF_BLOCK_SIZE) throw new EndOfStreamException();
+      this.core.seek(nodePtr);
+      reader.readFully(block.subarray(0, size));
+      const kindInt = block[0];
+      if (kindInt > BTreeNodeKind.BRANCH) throw new InvalidBTreeNodeKindException();
+      const kind = kindInt as BTreeNodeKind;
+      const num = block[1];
+      if (num > BTREE_SLOT_COUNT) throw new InvalidBTreeNodeException();
+      if (kind === BTreeNodeKind.BRANCH && size < branchBlockSize) throw new EndOfStreamException();
+
+      let i = 0;
+      if (kind === BTreeNodeKind.LEAF) {
+        if (rem >= num) throw new InvalidBTreeNodeException();
+        i = rem;
       } else {
-        let i = 0;
-        while (i + 1 < node.num && rem >= node.counts[i]) {
-          rem -= node.counts[i];
+        while (i + 1 < num) {
+          const count = Number(view.getBigInt64(countsPos + i * 8, false));
+          if (rem < count) break;
+          rem -= count;
           i++;
         }
-        nodePtr = Number(node.children[i].value);
       }
+
+      const slotPos = BTREE_NODE_HEADER_SIZE + i * Slot.LENGTH;
+      const slot = Slot.fromBytes(block.subarray(slotPos, slotPos + Slot.LENGTH));
+      if (kind === BTreeNodeKind.LEAF) return new SlotPointer(nodePtr + slotPos, slot);
+      nodePtr = Number(slot.value);
     }
   }
 
@@ -3214,36 +3234,16 @@ export class Database {
   }
 
   // descend by key to the matching leaf entry, or null
-  sortedGet(rootPtr: number, key: Uint8Array): SortedSlot | null {
+  sortedGet(rootPtr: number, key: Uint8Array): Slot | null {
     let nodePtr = rootPtr;
     while (true) {
       const node = this.readSortedNode(nodePtr);
       if (node.kind === BTreeNodeKind.LEAF) {
         const search = this.sortedLeafSearch(node, key);
         if (!search.found) return null;
-        return new SortedSlot(node.entries[search.index], nodePtr + BTREE_NODE_HEADER_SIZE + search.index * Slot.LENGTH);
+        return node.entries[search.index];
       } else {
         const i = this.sortedBranchSearch(node, key);
-        nodePtr = Number(node.children[i].value);
-      }
-    }
-  }
-
-  // descend by rank to the leaf entry at the given 0-based index
-  sortedGetByIndex(rootPtr: number, rank: number): SortedSlot {
-    let nodePtr = rootPtr;
-    let rem = rank;
-    while (true) {
-      const node = this.readSortedNode(nodePtr);
-      if (node.kind === BTreeNodeKind.LEAF) {
-        const i = rem;
-        return new SortedSlot(node.entries[i], nodePtr + BTREE_NODE_HEADER_SIZE + i * Slot.LENGTH);
-      } else {
-        let i = 0;
-        while (i + 1 < node.num && rem >= node.counts[i]) {
-          rem -= node.counts[i];
-          i++;
-        }
         nodePtr = Number(node.children[i].value);
       }
     }
