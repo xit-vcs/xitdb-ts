@@ -203,7 +203,8 @@ export class ReadCursor implements Slotted {
 
     return new KeyValuePairCursor(
       new ReadCursor(new SlotPointer(kvValuePosition(slotPtr.slot, hashSize), kvPair.valueSlot), this.db, this.frozenAt),
-      new ReadCursor(new SlotPointer(kvKeyPosition(slotPtr.slot, hashSize), kvPair.keySlot), this.db, this.frozenAt),
+      // a key-only entry is its own key slot, so its key is where the entry is
+      new ReadCursor(new SlotPointer(kvKeyPosition(slotPtr.slot, hashSize) ?? slotPtr.position, kvPair.keySlot), this.db, this.frozenAt),
       kvPair.hash
     );
   }
