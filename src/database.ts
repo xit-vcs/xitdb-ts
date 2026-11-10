@@ -2491,11 +2491,12 @@ export class Database {
     }
 
     let slotPtr = this.readArrayListSlot(indexPos, key, nextShift, writeMode, frozenAt);
-    // clear values left by a rollback or slice
+    // clear values left by a rollback or slice. the slot is written as a NONE
+    // slot marked full, so it counts as an element even if nothing is written to it.
     slotPtr = slotPtr.withSlot(new Slot());
     if (slotPtr.position === null) throw new CursorNotWriteableException();
     this.core.seek(slotPtr.position);
-    writer.write(slotPtr.slot.toBytes());
+    writer.write(new Slot(0n, Tag.NONE, true).toBytes());
     return new ArrayListAppendResult(new ArrayListHeader(indexPos, header.size + 1), slotPtr);
   }
 

@@ -99,7 +99,8 @@ describe('Low Level API', () => {
     }), /rollback/);
     assert.deepStrictEqual(frozen.readBytes(MAX_READ_BYTES), new Uint8Array(16));
     assert.strictEqual(history.appendCursor().slot().tag, Tag.NONE);
-    assert.strictEqual(history.getSlot(-1), null);
+    // the cleared slot still counts as an element
+    assert.deepStrictEqual(history.getSlot(-1), new Slot(0n, Tag.NONE, true));
     assert.throws(() => history.appendContext(new Bytes(new Uint8Array(16)), cursor => {
       assert.fail('rollback');
     }), assert.AssertionError);
