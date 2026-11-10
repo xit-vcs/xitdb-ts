@@ -110,10 +110,13 @@ export class Header {
   }
 
   static read(core: Core): Header {
-    const reader = core.reader();
     const bytes = new Uint8Array(Header.LENGTH);
-    reader.readFully(bytes);
-    const view = new DataView(bytes.buffer);
+    core.reader().readFully(bytes);
+    return Header.fromBytes(bytes);
+  }
+
+  static fromBytes(bytes: Uint8Array): Header {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const magicNumber = bytes.slice(0, 3);
     const version = view.getInt16(4, false);
     const hashSize = view.getInt16(6, false);
@@ -178,6 +181,12 @@ export const ROOT_HEADER_START = Header.LENGTH;
 // which lets a CPU read and write it as a single unit. the bytes before it are
 // padding.
 const FILE_SIZE_START = Math.ceil(ROOT_HEADER_START / 8) * 8;
+
+// where the root header's file size is. the committed data starts after it.
+// version 1 has a copy of the root slot before it, which isn't used or updated.
+function fileSizeStart(version: number): number {
+  return version === 1 ? ROOT_HEADER_START + Slot.LENGTH : FILE_SIZE_START;
+}
 
 // the size of the committed bytes, and the root slot from the trailer that ends them
 export class RootHeader {
@@ -1658,19 +1667,27 @@ export class Database {
     this.core = core;
     this.hasher = hasher;
 
-    core.seek(0);
-    if ((core.length()) === 0) {
+    // a database whose first commit never finished holds nothing. if it is no
+    // bigger than a new database, it was interrupted while being created, so
+    // it is created again. otherwise it is a full copy that was interrupted
+    // (see `openReplicated`), which is left for the next sync to replace.
+    let hasCommit = false;
+    if (core.length() > 0) {
+      this.header = this.readAndValidateHeader();
+      hasCommit = this.readFileSize() > 0;
+      const newSize = fileSizeStart(this.header.version) + 8 + RootTrailer.LENGTH;
+      if (!hasCommit && core.length() <= newSize) core.setLength(0);
+    }
+
+    if (core.length() === 0) {
       this.header = new Header(fileId ?? randomU64(), hasher.id, hasher.digestLength, VERSION, MAGIC_NUMBER);
-      this.header.write(core);
-      // write the root header and commit an empty root, so the
-      // file ends with a trailer like after any transaction
-      core.writer().write(new Uint8Array(FILE_SIZE_START + 8 - ROOT_HEADER_START));
-      // the first commit's ID is 0, so a new database's bytes only
-      // depend on its file ID
+      this.writeHeaders();
+      // commit an empty root, so the file ends with a trailer like after
+      // any transaction. the first commit's ID is 0, so a new database's
+      // bytes only depend on its file ID
       this.commitRoot(new Slot(), 0n);
       core.sync();
-    } else {
-      this.header = this.readAndValidateHeader();
+    } else if (hasCommit) {
       this.committedSize();
     }
   }
@@ -1678,11 +1695,15 @@ export class Database {
   private readAndValidateHeader(): Header {
     this.core.seek(0);
     const header = Header.read(this.core);
+    this.validateHeader(header);
+    return header;
+  }
+
+  private validateHeader(header: Header): void {
     header.validate();
     if (header.hashSize !== this.hasher.digestLength) {
       throw new InvalidHashSizeException();
     }
-    return header;
   }
 
   rootCursor(): WriteCursor {
@@ -1718,6 +1739,8 @@ export class Database {
 
   /** this database's `ReplicaState`. */
   replicaState(): ReplicaState {
+    // a full copy that didn't finish has no first commit (see `openReplicated`)
+    if (this.readFileSize() === 0) return { committedSize: 0, checksum: 0n };
     const committedSize = this.committedSize();
     return { committedSize, checksum: this.readRootTrailer(committedSize).checksum };
   }
@@ -1749,13 +1772,13 @@ export class Database {
    */
   readCommitted(start: number, end: number, writer: Pick<DataWriter, 'write'>): void {
     if (start < 0 || start > end || end > this.committedSize()) throw new InvalidRangeException();
-    const fileSizeStart = this.fileSizeStart();
-    const dataStart = fileSizeStart + 8;
+    const sizeStart = fileSizeStart(this.header.version);
+    const dataStart = sizeStart + 8;
     if (start > 0 && start < dataStart) throw new InvalidRangeException();
     if (start === 0) {
       // the bytes must end with a trailer
       this.readRootTrailer(end);
-      this.streamTo(writer, 0, fileSizeStart);
+      this.streamTo(writer, 0, sizeStart);
       writer.write(u64Bytes(end));
       this.streamTo(writer, dataStart, end - dataStart);
     } else {
@@ -1787,12 +1810,15 @@ export class Database {
    * to this database right away, and `close` commits them. if fewer than
    * `len` bytes were written, or they don't end with a trailer, `close` throws
    * and the database stays at its last commit. when `start` is 0, this
-   * database is truncated now and replaced by the bytes.
+   * database is replaced by the bytes once their headers have arrived. its
+   * root header stays empty until the rest has arrived, so a copy that doesn't
+   * finish is a database without a first commit (see the constructor), which
+   * the next sync replaces.
    */
   openReplicated(start: number, len: number): ReplicaWriter {
     if (len < 0) throw new InvalidRangeException();
     if (start === 0) {
-      this.core.setLength(0);
+      if (len < Header.LENGTH) throw new InvalidRangeException();
     } else if (start === this.committedSize()) {
       // discard anything past the committed bytes, such as the remains of an interrupted sync
       this.truncate();
@@ -1802,10 +1828,46 @@ export class Database {
 
     let written = 0;
     let closed = false;
+    let failed = false;
+    // when `start` is 0, the database header and root header that come first.
+    // version 1's root header is the biggest.
+    let headers: Uint8Array | null = start === 0 ? new Uint8Array(Header.LENGTH + Slot.LENGTH + 8) : null;
+    // where the headers end, once the database header has arrived
+    let headersEnd = -1;
     return {
       write: (chunk: Uint8Array): void => {
         if (closed) throw new Error('replica writer is closed');
+        if (failed) throw new Error('replica writer failed');
         if (chunk.length > len - written) throw new InvalidRangeException();
+        try {
+          while (headers !== null && chunk.length > 0) {
+            const k = Math.min(chunk.length, (headersEnd < 0 ? Header.LENGTH : headersEnd) - written);
+            headers.set(chunk.subarray(0, k), written);
+            written += k;
+            chunk = chunk.subarray(k);
+            if (headersEnd < 0 && written === Header.LENGTH) {
+              const header = Header.fromBytes(headers);
+              this.validateHeader(header);
+              headersEnd = fileSizeStart(header.version) + 8;
+              if (len < headersEnd) throw new InvalidRangeException();
+            }
+            if (written === headersEnd) {
+              // the bytes are a different database, with its own header
+              this.core.setLength(0);
+              this.header = Header.fromBytes(headers);
+              this.writeHeaders();
+              // sync the headers before the data, which could otherwise reach
+              // the disk without them and leave a file that can't be opened.
+              // the root header that came with the bytes isn't needed.
+              this.core.sync();
+              headers = null;
+            }
+          }
+        } catch (e) {
+          failed = true;
+          throw e;
+        }
+        if (chunk.length === 0) return;
         this.core.seek(start + written);
         this.core.writer().write(chunk);
         written += chunk.length;
@@ -1813,7 +1875,7 @@ export class Database {
       close: (): void => {
         if (closed) return;
         closed = true;
-        if (written !== len) throw new EndOfStreamException();
+        if (failed || written !== len) throw new EndOfStreamException();
         this.commitReplicated(start, len);
       },
     };
@@ -1821,12 +1883,7 @@ export class Database {
 
   // commits `len` bytes written at `start` by a replica writer
   private commitReplicated(start: number, len: number): void {
-    if (start === 0) {
-      // the bytes are a different database, with its own header
-      this.core.sync();
-      this.header = this.readAndValidateHeader();
-      this.committedSize();
-    } else if (len > 0) {
+    if (len > 0) {
       // the bytes must end with a trailer. update the root header to match it.
       this.readRootTrailer(start + len);
       this.core.sync();
@@ -1925,18 +1982,29 @@ export class Database {
     }
   }
 
-  // where the root header's file size is. the committed data starts after it.
-  // version 1 has a copy of the root slot before it, which isn't used or updated.
-  private fileSizeStart(): number {
-    return this.header.version === 1 ? ROOT_HEADER_START + Slot.LENGTH : FILE_SIZE_START;
+  // writes the database header and an empty root header. the database has
+  // no first commit until the root header is given its file size.
+  private writeHeaders(): void {
+    this.core.seek(0);
+    this.header.write(this.core);
+    this.core.writer().write(new Uint8Array(fileSizeStart(this.header.version) + 8 - ROOT_HEADER_START));
+  }
+
+  // the root header's file size. it is 0 until the first commit or full copy
+  // has finished, including when the file was cut off before it.
+  private readFileSize(): number {
+    const sizeStart = fileSizeStart(this.header.version);
+    if (this.core.length() < sizeStart + 8) return 0;
+    this.core.seek(sizeStart);
+    return this.core.reader().readLong();
   }
 
   // the file size from the root header, and the root slot from the trailer it points to
   readRootHeader(): RootHeader {
-    const fileSizeStart = this.fileSizeStart();
-    this.core.seek(fileSizeStart);
+    const sizeStart = fileSizeStart(this.header.version);
+    this.core.seek(sizeStart);
     const fileSize = this.core.reader().readLong();
-    const minimumSize = fileSizeStart + 8 + RootTrailer.LENGTH;
+    const minimumSize = sizeStart + 8 + RootTrailer.LENGTH;
     if (fileSize < minimumSize) throw new InvalidDatabaseException();
     if (this.core.length() < fileSize) throw new TruncatedDatabaseException();
     // the committed bytes must end with a trailer
@@ -1984,7 +2052,7 @@ export class Database {
   // points the root header at the trailer that ends the file.
   private writeRootHeader(): void {
     const fileSize = this.core.length();
-    this.core.seek(this.fileSizeStart());
+    this.core.seek(fileSizeStart(this.header.version));
     this.core.writer().write(u64Bytes(fileSize));
   }
 
