@@ -65,7 +65,6 @@ export {
   type ReplicaState,
   type ReplicaWriter,
   ROOT_HEADER_START,
-  ROOT_HEADER_END,
   BTreeNode,
   BTreeNodeKind,
   BTreeNodeRef,

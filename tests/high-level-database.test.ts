@@ -1898,12 +1898,12 @@ function replicate(source: Database, replica: Database): void {
 }
 
 // checks that no committed byte has changed since `committed` was read,
-// except the root header (the root slot and file size after the database
+// except the root header (the padding and file size after the database
 // header). then replicates and checks that the replica is identical.
 // returns the committed bytes, to be passed to the next call.
 function expectAppendOnlyAndReplicate(source: Database, replica: Database, committed: Uint8Array): Uint8Array {
   const rootHeaderStart = Header.LENGTH;
-  const rootHeaderEnd = rootHeaderStart + 17;
+  const rootHeaderEnd = rootHeaderStart + 12;
   const current = readCommittedBytes(source, 0);
   assert.ok(current.length >= committed.length);
   assert.deepStrictEqual(current.subarray(0, rootHeaderStart), committed.subarray(0, rootHeaderStart));
@@ -1940,16 +1940,16 @@ function testReplication(sourceCore: Core, replicaCore: Core, hasher: Hasher): v
   // a new database is its header (which ends with its file ID), its root
   // header, and the trailer for its empty root: the slot (9 zero bytes), the commit ID (0 for
   // the first commit), then the CRC-64/XZ of the file ID, the trailer's position
-  // (37), the slot, and the commit ID
+  // (32), the slot, and the commit ID
   {
     const bytes = readCommittedBytes(source, 0);
-    assert.strictEqual(bytes.length, 62);
+    assert.strictEqual(bytes.length, 57);
     assert.deepStrictEqual(bytes.subarray(12, 20), new Uint8Array([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]));
-    assert.deepStrictEqual(bytes.subarray(37), new Uint8Array([
+    assert.deepStrictEqual(bytes.subarray(32), new Uint8Array([
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-      0x00, 0xd6, 0x18, 0x4e, 0x46, 0xb4, 0x7d, 0x29,
-      0x26,
+      0x00, 0x95, 0xd4, 0x94, 0xc3, 0x4d, 0xf8, 0x07,
+      0xe5,
     ]));
   }
 

@@ -33,7 +33,27 @@ import {
 import { Bytes, Float, Int, Uint, type WriteableData } from './writeable-data.js';
 import { WriteCursor } from './write-cursor.js';
 
-export const VERSION = 1;
+// the database version. bump for format-breaking changes.
+//
+// version 0:
+//   the design that xitdb had for its first few years of life.
+//   this format was *mostly* append-only, but the top-level
+//   data structure was mutable, making replication impractical.
+//   support has been completely removed because xitdb had
+//   basically one user for the duration of this version.
+// version 1:
+//   introduces the root header, and a trailer at the end of
+//   every commit. the top-level data structure is now fully
+//   immutable, which means the *only* thing mutated is the
+//   root header. this made replication trivial, and as a
+//   side benefit, even top-level hash maps are transactional.
+// version 2:
+//   fixes a small flaw in the version 1 root header that made
+//   tearing possible when reading during a commit. the file
+//   size was at a misaligned offset, which on typical CPUs
+//   meant that it could contain a torn value leading to a
+//   read error. now it is stored at offset 24.
+export const VERSION = 2;
 export const MAGIC_NUMBER = new Uint8Array([0x78, 0x69, 0x74]); // 'xit'
 export const BIT_COUNT = 4;
 export const SLOT_COUNT = 1 << BIT_COUNT;
@@ -111,7 +131,7 @@ export class Header {
     if (!arraysEqual(this.magicNumber, MAGIC_NUMBER)) {
       throw new InvalidDatabaseException();
     }
-    if (this.version !== VERSION) {
+    if (this.version !== 1 && this.version !== VERSION) {
       throw new InvalidVersionException();
     }
   }
@@ -147,38 +167,29 @@ export class ArrayListHeader {
 
 // the database header is followed by the root header. the top-level data is a
 // root slot of any type, and every write to it is a copy-on-write transaction
-// that appends a trailer holding the new root slot. the root header only caches
-// the latest trailer, so every other committed byte is immutable, and a replica
-// stays in sync by copying the bytes it doesn't have.
+// that appends a trailer holding the new root slot. the root header only says
+// where the latest trailer ends, so every other committed byte is immutable, and
+// a replica stays in sync by copying the bytes it doesn't have.
 export const ROOT_HEADER_START = Header.LENGTH;
 
-// rewritten at every commit, as a cache of the latest trailer. the root slot
-// comes first on disk.
-// we only read `fileSize`, which lets us read the trailer. other xitdb
-// implementations may read the whole header to avoid that extra read,
-// but that increases the risk of a concurrent commit tearing it.
+// the root header is the size of the committed bytes. a commit rewrites it in
+// place, and a concurrent read from another `Database` must not see it half
+// written. so it is written by itself, and it starts at a multiple of 8 bytes,
+// which lets a CPU read and write it as a single unit. the bytes before it are
+// padding.
+const FILE_SIZE_START = Math.ceil(ROOT_HEADER_START / 8) * 8;
+
+// the size of the committed bytes, and the root slot from the trailer that ends them
 export class RootHeader {
-  static readonly LENGTH = Slot.LENGTH + 8;
-
   constructor(public fileSize: number, public root: Slot) {}
-
-  toBytes(): Uint8Array {
-    const buffer = new Uint8Array(RootHeader.LENGTH);
-    buffer.set(this.root.toBytes(), 0);
-    new DataView(buffer.buffer).setBigUint64(Slot.LENGTH, BigInt(this.fileSize), false);
-    return buffer;
-  }
-
-  static fromBytes(bytes: Uint8Array): RootHeader {
-    const root = Slot.fromBytes(bytes.subarray(0, Slot.LENGTH));
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const fileSize = Number(view.getBigUint64(Slot.LENGTH, false));
-    return new RootHeader(fileSize, root);
-  }
 }
 
-export const ROOT_HEADER_END = ROOT_HEADER_START + RootHeader.LENGTH;
-const ROOT_HEADER_FILE_SIZE_START = ROOT_HEADER_START + Slot.LENGTH;
+// a big-endian u64
+function u64Bytes(value: number): Uint8Array {
+  const buffer = new Uint8Array(8);
+  new DataView(buffer.buffer).setBigUint64(0, BigInt(value), false);
+  return buffer;
+}
 
 // appended at the end of every transaction, so the committed bytes (up to the
 // root header's `fileSize`) always end with one. the root slot comes first on
@@ -1653,7 +1664,7 @@ export class Database {
       this.header.write(core);
       // write the root header and commit an empty root, so the
       // file ends with a trailer like after any transaction
-      core.writer().write(new RootHeader(0, new Slot()).toBytes());
+      core.writer().write(new Uint8Array(FILE_SIZE_START + 8 - ROOT_HEADER_START));
       // the first commit's ID is 0, so a new database's bytes only
       // depend on its file ID
       this.commitRoot(new Slot(), 0n);
@@ -1738,12 +1749,15 @@ export class Database {
    */
   readCommitted(start: number, end: number, writer: Pick<DataWriter, 'write'>): void {
     if (start < 0 || start > end || end > this.committedSize()) throw new InvalidRangeException();
-    if (start > 0 && start < ROOT_HEADER_END) throw new InvalidRangeException();
+    const fileSizeStart = this.fileSizeStart();
+    const dataStart = fileSizeStart + 8;
+    if (start > 0 && start < dataStart) throw new InvalidRangeException();
     if (start === 0) {
-      const trailer = this.readRootTrailer(end);
-      this.streamTo(writer, 0, ROOT_HEADER_START);
-      writer.write(new RootHeader(end, trailer.root).toBytes());
-      this.streamTo(writer, ROOT_HEADER_END, end - ROOT_HEADER_END);
+      // the bytes must end with a trailer
+      this.readRootTrailer(end);
+      this.streamTo(writer, 0, fileSizeStart);
+      writer.write(u64Bytes(end));
+      this.streamTo(writer, dataStart, end - dataStart);
     } else {
       this.streamTo(writer, start, end - start);
     }
@@ -1814,9 +1828,9 @@ export class Database {
       this.committedSize();
     } else if (len > 0) {
       // the bytes must end with a trailer. update the root header to match it.
-      const trailer = this.readRootTrailer(start + len);
+      this.readRootTrailer(start + len);
       this.core.sync();
-      this.writeRootHeader(trailer.root);
+      this.writeRootHeader();
       this.core.sync();
     }
   }
@@ -1911,11 +1925,18 @@ export class Database {
     }
   }
 
+  // where the root header's file size is. the committed data starts after it.
+  // version 1 has a copy of the root slot before it, which isn't used or updated.
+  private fileSizeStart(): number {
+    return this.header.version === 1 ? ROOT_HEADER_START + Slot.LENGTH : FILE_SIZE_START;
+  }
+
   // the file size from the root header, and the root slot from the trailer it points to
   readRootHeader(): RootHeader {
-    this.core.seek(ROOT_HEADER_FILE_SIZE_START);
+    const fileSizeStart = this.fileSizeStart();
+    this.core.seek(fileSizeStart);
     const fileSize = this.core.reader().readLong();
-    const minimumSize = ROOT_HEADER_END + RootTrailer.LENGTH;
+    const minimumSize = fileSizeStart + 8 + RootTrailer.LENGTH;
     if (fileSize < minimumSize) throw new InvalidDatabaseException();
     if (this.core.length() < fileSize) throw new TruncatedDatabaseException();
     // the committed bytes must end with a trailer
@@ -1957,15 +1978,14 @@ export class Database {
     // never reached disk.
     this.core.sync();
 
-    this.writeRootHeader(root);
+    this.writeRootHeader();
   }
 
-  // points the root header at `root`, which must be in the trailer that ends
-  // the file.
-  private writeRootHeader(root: Slot): void {
+  // points the root header at the trailer that ends the file.
+  private writeRootHeader(): void {
     const fileSize = this.core.length();
-    this.core.seek(ROOT_HEADER_START);
-    this.core.writer().write(new RootHeader(fileSize, root).toBytes());
+    this.core.seek(this.fileSizeStart());
+    this.core.writer().write(u64Bytes(fileSize));
   }
 
   // whether this slot pointer is the root of the database
