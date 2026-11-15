@@ -147,10 +147,6 @@ class RandomAccessBufferedFile implements DataReader, DataWriter, Disposable {
       this.memoryPos = this.filePos;
     }
 
-    if (this.fileLen === null) {
-      this.fileLen = this.file.length();
-    }
-
     if (this.filePos >= this.memoryPos && this.filePos - this.memoryPos + buffer.length <= this.bufferSize) {
       // write to the in-memory buffer
       this.memory.seek(this.filePos - this.memoryPos);
@@ -162,6 +158,12 @@ class RandomAccessBufferedFile implements DataReader, DataWriter, Disposable {
         this.flush();
       }
       this.writeToFile(this.filePos, buffer);
+    }
+
+    // cache the file's length only after a successful write. a failed
+    // one may leave nothing to flush, so nothing would clear it.
+    if (this.fileLen === null) {
+      this.fileLen = this.file.length();
     }
 
     this.filePos += buffer.length;
