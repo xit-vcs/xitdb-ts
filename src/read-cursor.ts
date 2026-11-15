@@ -25,6 +25,7 @@ import {
   InvalidOffsetException,
   KeyNotFoundException,
   ExpectedUnsignedLongException,
+  InvalidBTreeNodeException,
 } from './exceptions.js';
 import { Bytes } from './writeable-data.js';
 
@@ -550,6 +551,7 @@ export class CursorIterator {
       const node = cursor.db.readSortedNode(nodePtr);
       const position = nodePtr + BTREE_NODE_HEADER_SIZE;
       if (node.kind === BTreeNodeKind.LEAF) {
+        if (rem >= node.num) throw new InvalidBTreeNodeException();
         stack.push(new IteratorLevel(position, node.entries, rem));
         return stack;
       } else {
@@ -593,6 +595,7 @@ export class CursorIterator {
       const node = cursor.db.readBTreeNode(nodePtr);
       const position = nodePtr + BTREE_NODE_HEADER_SIZE;
       if (node.kind === BTreeNodeKind.LEAF) {
+        if (rem >= node.num) throw new InvalidBTreeNodeException();
         stack.push(new IteratorLevel(position, node.values, rem));
         return stack;
       } else {

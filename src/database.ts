@@ -2751,6 +2751,7 @@ export class Database {
     const node = this.readBTreeNode(nodePtr);
     switch (node.kind) {
       case BTreeNodeKind.LEAF: {
+        if (rank > node.num) throw new InvalidBTreeNodeException();
         // build the entries with a placeholder spliced in at `rank`. the placeholder
         // is a NONE slot marked full so that, if the caller never writes a value
         // (e.g. appendCursor), iteration still counts it as an element rather than
@@ -2859,6 +2860,7 @@ export class Database {
     const node = this.readBTreeNode(nodePtr);
     switch (node.kind) {
       case BTreeNodeKind.LEAF: {
+        if (rank >= node.num) throw new InvalidBTreeNodeException();
         const newPtr = this.btreeReusable(nodePtr, frozenAt) ? nodePtr : this.writeBTreeNode(node);
         return new BTreeWriteSlot(newPtr, newPtr + BTREE_NODE_HEADER_SIZE + rank * Slot.LENGTH, node.values[rank]);
       }
@@ -2891,6 +2893,7 @@ export class Database {
     const node = this.readBTreeNode(nodePtr);
     switch (node.kind) {
       case BTreeNodeKind.LEAF: {
+        if (rank >= node.num) throw new InvalidBTreeNodeException();
         for (let k = rank; k + 1 < node.num; k++) node.values[k] = node.values[k + 1];
         node.num--;
         node.values[node.num] = new Slot();
@@ -3112,6 +3115,7 @@ export class Database {
     const node = this.readBTreeNode(rootPtr);
     switch (node.kind) {
       case BTreeNodeKind.LEAF: {
+        if (rank > node.num) throw new InvalidBTreeNodeException();
         const r = rank;
         const left = new BTreeNode(BTreeNodeKind.LEAF, r);
         for (let k = 0; k < r; k++) left.values[k] = node.values[k];

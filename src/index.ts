@@ -36,6 +36,10 @@ export {
   InvalidFormatTagSizeException,
   UnexpectedWriterPositionException,
   MaxShiftExceededException,
+  InvalidBTreeNodeException,
+  InvalidBTreeNodeKindException,
+  Uint64OverflowException,
+  Int64OverflowException,
   InvalidRangeException,
   TargetNotEmptyException,
 } from './exceptions.js';
