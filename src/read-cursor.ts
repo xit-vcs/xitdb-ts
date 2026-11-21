@@ -17,6 +17,7 @@ import {
   BTreeNodeKind,
   SLOT_COUNT,
   BIT_COUNT,
+  MAX_BTREE_DEPTH,
 } from './database.js';
 import {
   UnexpectedTagException,
@@ -26,6 +27,7 @@ import {
   KeyNotFoundException,
   ExpectedUnsignedLongException,
   InvalidBTreeNodeException,
+  IteratorStackOverflowException,
 } from './exceptions.js';
 import { Bytes } from './writeable-data.js';
 
@@ -547,7 +549,7 @@ export class CursorIterator {
     const stack: IteratorLevel[] = [];
     let nodePtr = rootPtr;
     let rem = startIndex;
-    while (true) {
+    for (let depth = 0; depth < MAX_BTREE_DEPTH; depth++) {
       const node = cursor.db.readSortedNode(nodePtr);
       const position = nodePtr + BTREE_NODE_HEADER_SIZE;
       if (node.kind === BTreeNodeKind.LEAF) {
@@ -564,6 +566,7 @@ export class CursorIterator {
         nodePtr = Number(node.children[i].value);
       }
     }
+    throw new InvalidBTreeNodeException();
   }
 
   // descend the array-list radix trie to startIndex, pushing one IteratorLevel
@@ -591,7 +594,7 @@ export class CursorIterator {
     const stack: IteratorLevel[] = [];
     let nodePtr = rootPtr;
     let rem = startIndex;
-    while (true) {
+    for (let depth = 0; depth < MAX_BTREE_DEPTH; depth++) {
       const node = cursor.db.readBTreeNode(nodePtr);
       const position = nodePtr + BTREE_NODE_HEADER_SIZE;
       if (node.kind === BTreeNodeKind.LEAF) {
@@ -608,6 +611,7 @@ export class CursorIterator {
         nodePtr = Number(node.children[i].value);
       }
     }
+    throw new InvalidBTreeNodeException();
   }
 
   private static sortedStackFromKey(
@@ -618,7 +622,7 @@ export class CursorIterator {
     const stack: IteratorLevel[] = [];
     let nodePtr = rootPtr;
     let before = 0;
-    while (true) {
+    for (let depth = 0; depth < MAX_BTREE_DEPTH; depth++) {
       const node = cursor.db.readSortedNode(nodePtr);
       const position = nodePtr + BTREE_NODE_HEADER_SIZE;
       if (node.kind === BTreeNodeKind.LEAF) {
@@ -633,6 +637,7 @@ export class CursorIterator {
         nodePtr = Number(node.children[i].value);
       }
     }
+    throw new InvalidBTreeNodeException();
   }
 
   init(): void {
@@ -778,6 +783,12 @@ export class CursorIterator {
       } else {
         const nextSlot = level.block[level.index];
         if (nextSlot.tag === Tag.INDEX) {
+          // the iterator pushes one stack level per tree level. the deepest
+          // iterable structure is the hash trie (hashSize*8/BIT_COUNT levels) or
+          // a b-tree; the array list's radix trie is shallower than both.
+          if (this.stack.length >= Math.max((this.cursor.db.header.hashSize * 8) / BIT_COUNT, MAX_BTREE_DEPTH)) {
+            throw new IteratorStackOverflowException();
+          }
           // nodeOffset skips a b-tree node's kind+num header
           const nextPos = Number(nextSlot.value) + nodeOffset;
           this.stack.push(new IteratorLevel(nextPos, CursorIterator.readSlotBlock(this.cursor, nextPos), 0));

@@ -37,6 +37,7 @@ export {
   UnexpectedWriterPositionException,
   MaxShiftExceededException,
   InvalidBTreeNodeException,
+  IteratorStackOverflowException,
   InvalidBTreeNodeKindException,
   Uint64OverflowException,
   Int64OverflowException,

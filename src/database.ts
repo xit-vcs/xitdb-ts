@@ -60,6 +60,9 @@ export const SLOT_COUNT = 1 << BIT_COUNT;
 export const MASK = BigInt(SLOT_COUNT - 1);
 export const INDEX_BLOCK_SIZE = Slot.LENGTH * SLOT_COUNT;
 export const MAX_BRANCH_LENGTH = 16;
+// a b-tree's height is at most log2 of a 64-bit size = 64, given the
+// minimum fan-out of 2
+export const MAX_BTREE_DEPTH = 64;
 // b-tree (backs LinkedArrayList): nodes hold up to BTREE_SLOT_COUNT entries
 export const BTREE_SLOT_COUNT = SLOT_COUNT; // max entries per leaf / children per branch
 export const BTREE_SPLIT_COUNT = Math.floor((BTREE_SLOT_COUNT + 1) / 2); // left side of a split
@@ -842,7 +845,7 @@ export class LinkedArrayListGet implements PathPartBase {
       return db.readSlotPointer(writeMode, path, pathI + 1, finalSlotPtr, frozenAt);
     } else {
       // path-copy down to the value slot so the write is persistent
-      const writeSlot = db.btreeGetForWrite(header.rootPtr, rank, frozenAt);
+      const writeSlot = db.btreeGetForWrite(header.rootPtr, rank, frozenAt, 0);
       // update the header before callbacks can freeze it
       if (writeSlot.nodePtr !== header.rootPtr) {
         const writer = db.core.writer();
@@ -876,7 +879,7 @@ export class LinkedArrayListAppend implements PathPartBase {
     reader.readFully(headerBytes);
     const header = BTreeHeader.fromBytes(headerBytes);
 
-    const result = db.btreeInsert(header.rootPtr, header.size, frozenAt);
+    const result = db.btreeInsert(header.rootPtr, header.size, frozenAt, 0);
     const newRootPtr = db.btreeGrowRoot(result);
 
     // update the header before filling in the value, so that a failure in the
@@ -925,8 +928,8 @@ export class LinkedArrayListSlice implements PathPartBase {
     }
 
     // slice = drop [0, offset) then keep [0, size) of what's left
-    const afterOffset = db.btreeSplit(header.rootPtr, this.offset);
-    const sliced = db.btreeSplit(afterOffset.right, this.size);
+    const afterOffset = db.btreeSplit(header.rootPtr, this.offset, 0);
+    const sliced = db.btreeSplit(afterOffset.right, this.size, 0);
     const newRootPtr = sliced.left;
 
     // update the header before recursing into the rest of the path, so that a
@@ -1013,7 +1016,7 @@ export class LinkedArrayListInsert implements PathPartBase {
     }
     const rank = index < 0 ? header.size - Math.abs(index) : index;
 
-    const result = db.btreeInsert(header.rootPtr, rank, frozenAt);
+    const result = db.btreeInsert(header.rootPtr, rank, frozenAt, 0);
     const newRootPtr = db.btreeGrowRoot(result);
 
     // update the header before filling in the value, so that a failure in the
@@ -1065,7 +1068,7 @@ export class LinkedArrayListRemove implements PathPartBase {
     if (header.size === 1) {
       newRootPtr = db.btreeNewRoot();
     } else {
-      let root = db.btreeRemove(header.rootPtr, rank, frozenAt);
+      let root = db.btreeRemove(header.rootPtr, rank, frozenAt, 0);
       newRootPtr = db.btreeWriteNode(root, header.rootPtr, frozenAt);
       // a root left with one child is replaced by it
       while (root.kind === BTreeNodeKind.BRANCH && root.num === 1) {
@@ -1372,7 +1375,7 @@ export class SortedMapGet implements PathPartBase {
     } else {
       // only a set that is just touching the key can leave out the value
       const keyOnly = slotPtr.slot.tag === Tag.SORTED_SET && this.target instanceof SortedMapGetKey;
-      const result = db.sortedPut(header.rootPtr, key, keyOnly, frozenAt);
+      const result = db.sortedPut(header.rootPtr, key, keyOnly, frozenAt, 0);
       const newRootPtr = db.sortedGrowRoot(result);
 
       // update the header before filling in the value, so that a failure in the
@@ -1463,7 +1466,7 @@ export class SortedMapRemove implements PathPartBase {
     reader.readFully(headerBytes);
     const header = BTreeHeader.fromBytes(headerBytes);
 
-    const result = db.sortedRemove(header.rootPtr, this.key, frozenAt);
+    const result = db.sortedRemove(header.rootPtr, this.key, frozenAt, 0);
     if (!result.found) throw new KeyNotFoundException();
 
     const writer = db.core.writer();
@@ -2711,7 +2714,7 @@ export class Database {
     const length = this.core.length();
     let nodePtr = rootPtr;
     let rem = rank;
-    while (true) {
+    for (let depth = 0; depth < MAX_BTREE_DEPTH; depth++) {
       // a leaf may be at the end of the db, so there may not be a whole branch's
       // worth of bytes to read
       const size = Math.min(branchBlockSize, length - nodePtr);
@@ -2743,11 +2746,13 @@ export class Database {
       if (kind === BTreeNodeKind.LEAF) return new SlotPointer(nodePtr + slotPos, slot);
       nodePtr = Number(slot.value);
     }
+    throw new InvalidBTreeNodeException();
   }
 
   // insert a placeholder slot at `rank` within the subtree at nodePtr, writing new
   // nodes along the path. the caller fills in the value at the returned valuePosition.
-  btreeInsert(nodePtr: number, rank: number, frozenAt: number): BTreeInsertResult {
+  btreeInsert(nodePtr: number, rank: number, frozenAt: number, depth: number): BTreeInsertResult {
+    if (depth >= MAX_BTREE_DEPTH) throw new InvalidBTreeNodeException();
     const node = this.readBTreeNode(nodePtr);
     switch (node.kind) {
       case BTreeNodeKind.LEAF: {
@@ -2792,7 +2797,7 @@ export class Database {
           rem -= node.counts[i];
           i++;
         }
-        const child = this.btreeInsert(Number(node.children[i].value), rem, frozenAt);
+        const child = this.btreeInsert(Number(node.children[i].value), rem, frozenAt, depth + 1);
 
         // rebuild this branch with the (possibly split) child
         const children: Slot[] = [];
@@ -2856,7 +2861,8 @@ export class Database {
   // that belong to a past transaction. the element count is unchanged, so when the
   // whole path is already this-transaction nothing is rewritten and the caller writes
   // straight into the existing leaf.
-  btreeGetForWrite(nodePtr: number, rank: number, frozenAt: number): BTreeWriteSlot {
+  btreeGetForWrite(nodePtr: number, rank: number, frozenAt: number, depth: number): BTreeWriteSlot {
+    if (depth >= MAX_BTREE_DEPTH) throw new InvalidBTreeNodeException();
     const node = this.readBTreeNode(nodePtr);
     switch (node.kind) {
       case BTreeNodeKind.LEAF: {
@@ -2872,7 +2878,7 @@ export class Database {
           i++;
         }
         const childPtr = Number(node.children[i].value);
-        const child = this.btreeGetForWrite(childPtr, rem, frozenAt);
+        const child = this.btreeGetForWrite(childPtr, rem, frozenAt, depth + 1);
         // if the child stayed put, this branch is unchanged too
         if (child.nodePtr === childPtr) {
           return new BTreeWriteSlot(nodePtr, child.valuePosition, child.slot);
@@ -2889,7 +2895,8 @@ export class Database {
   // left behind for the caller to write. an emptied child is dropped and a child left
   // under half full is merged with a neighbor it fits with, so every leaf stays at the
   // same depth.
-  btreeRemove(nodePtr: number, rank: number, frozenAt: number): BTreeNode {
+  btreeRemove(nodePtr: number, rank: number, frozenAt: number, depth: number): BTreeNode {
+    if (depth >= MAX_BTREE_DEPTH) throw new InvalidBTreeNodeException();
     const node = this.readBTreeNode(nodePtr);
     switch (node.kind) {
       case BTreeNodeKind.LEAF: {
@@ -2907,7 +2914,7 @@ export class Database {
           i++;
         }
         const childPtr = Number(node.children[i].value);
-        let child = this.btreeRemove(childPtr, rem, frozenAt);
+        let child = this.btreeRemove(childPtr, rem, frozenAt, depth + 1);
         if (child.num === 0) {
           btreeDropChild(node, i);
           return node;
@@ -2939,12 +2946,13 @@ export class Database {
   btreeHeight(rootPtr: number): number {
     let ptr = rootPtr;
     let height = 0;
-    while (true) {
+    for (let depth = 0; depth < MAX_BTREE_DEPTH; depth++) {
       const node = this.readBTreeNode(ptr);
       if (node.kind === BTreeNodeKind.LEAF) return height;
       height++;
       ptr = Number(node.children[0].value);
     }
+    throw new InvalidBTreeNodeException();
   }
 
   btreeMakeRoot(result: BTreeJoinResult): number {
@@ -3111,7 +3119,8 @@ export class Database {
     return this.btreeAssembleBranch(subChildren, subCounts, len).nodePtr;
   }
 
-  btreeSplit(rootPtr: number, rank: number): BTreeSplitResult {
+  btreeSplit(rootPtr: number, rank: number, depth: number): BTreeSplitResult {
+    if (depth >= MAX_BTREE_DEPTH) throw new InvalidBTreeNodeException();
     const node = this.readBTreeNode(rootPtr);
     switch (node.kind) {
       case BTreeNodeKind.LEAF: {
@@ -3130,7 +3139,7 @@ export class Database {
           rem -= node.counts[i];
           i++;
         }
-        const child = this.btreeSplit(Number(node.children[i].value), rem);
+        const child = this.btreeSplit(Number(node.children[i].value), rem, depth + 1);
         const leftSub = this.btreeSubtree(node.children, node.counts, 0, i);
         const rightSub = this.btreeSubtree(node.children, node.counts, i + 1, node.num - (i + 1));
         return new BTreeSplitResult(this.btreeJoin(leftSub, child.left), this.btreeJoin(child.right, rightSub));
@@ -3329,7 +3338,7 @@ export class Database {
   // descend by key to the matching leaf entry, or null
   sortedGet(rootPtr: number, key: Uint8Array): Slot | null {
     let nodePtr = rootPtr;
-    while (true) {
+    for (let depth = 0; depth < MAX_BTREE_DEPTH; depth++) {
       const node = this.readSortedNode(nodePtr);
       if (node.kind === BTreeNodeKind.LEAF) {
         const search = this.sortedLeafSearch(node, key);
@@ -3340,13 +3349,14 @@ export class Database {
         nodePtr = Number(node.children[i].value);
       }
     }
+    throw new InvalidBTreeNodeException();
   }
 
   // number of keys strictly less than key (the inverse of getByIndex)
   sortedRank(rootPtr: number, key: Uint8Array): number {
     let nodePtr = rootPtr;
     let rank = 0;
-    while (true) {
+    for (let depth = 0; depth < MAX_BTREE_DEPTH; depth++) {
       const node = this.readSortedNode(nodePtr);
       if (node.kind === BTreeNodeKind.LEAF) {
         return rank + this.sortedLeafSearch(node, key).index;
@@ -3356,6 +3366,7 @@ export class Database {
         nodePtr = Number(node.children[i].value);
       }
     }
+    throw new InvalidBTreeNodeException();
   }
 
   // write a byte key as a short_bytes (inline, <=8 bytes, no interior zero) or external
@@ -3390,7 +3401,8 @@ export class Database {
   // value of the returned entry, unless keyOnly is true. in that case, a new key
   // is stored as a key-only entry, and an existing entry is left alone. otherwise,
   // the returned entry is a key-value pair with a writeable value.
-  sortedPut(nodePtr: number, key: Uint8Array, keyOnly: boolean, frozenAt: number): SortedInsertResult {
+  sortedPut(nodePtr: number, key: Uint8Array, keyOnly: boolean, frozenAt: number, depth: number): SortedInsertResult {
+    if (depth >= MAX_BTREE_DEPTH) throw new InvalidBTreeNodeException();
     const node = this.readSortedNode(nodePtr);
     switch (node.kind) {
       case BTreeNodeKind.LEAF: {
@@ -3446,7 +3458,7 @@ export class Database {
       }
       case BTreeNodeKind.BRANCH: {
         const i = this.sortedBranchSearch(node, key);
-        const child = this.sortedPut(Number(node.children[i].value), key, keyOnly, frozenAt);
+        const child = this.sortedPut(Number(node.children[i].value), key, keyOnly, frozenAt, depth + 1);
         // nothing below changed, so don't copy this node for no reason
         if (!child.added && child.nodePtr === Number(node.children[i].value)) {
           return new SortedInsertResult(nodePtr, node.subtreeCount(), child.entry, false, null);
@@ -3514,7 +3526,8 @@ export class Database {
 
   // remove key from the subtree at nodePtr, path-copying nodes and decrementing counts.
   // an emptied leaf is left in place (see SortedRemoveResult).
-  sortedRemove(nodePtr: number, key: Uint8Array, frozenAt: number): SortedRemoveResult {
+  sortedRemove(nodePtr: number, key: Uint8Array, frozenAt: number, depth: number): SortedRemoveResult {
+    if (depth >= MAX_BTREE_DEPTH) throw new InvalidBTreeNodeException();
     const node = this.readSortedNode(nodePtr);
     switch (node.kind) {
       case BTreeNodeKind.LEAF: {
@@ -3530,7 +3543,7 @@ export class Database {
       }
       case BTreeNodeKind.BRANCH: {
         const i = this.sortedBranchSearch(node, key);
-        const child = this.sortedRemove(Number(node.children[i].value), key, frozenAt);
+        const child = this.sortedRemove(Number(node.children[i].value), key, frozenAt, depth + 1);
         if (!child.found) return new SortedRemoveResult(nodePtr, false);
 
         const branch = node;
