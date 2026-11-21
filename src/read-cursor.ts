@@ -734,18 +734,22 @@ export class CursorIterator {
     switch (this.cursor.slotPtr.slot.tag) {
       case Tag.NONE:
         return null;
-      case Tag.ARRAY_LIST:
+      case Tag.ARRAY_LIST: {
         if (!(this.hasNext())) return null;
+        const nextCursor = this.nextInternal(0);
         this.index += 1;
-        return this.nextInternal(0);
+        return nextCursor;
+      }
       case Tag.LINKED_ARRAY_LIST:
       case Tag.SORTED_MAP:
-      case Tag.SORTED_SET:
+      case Tag.SORTED_SET: {
         if (!(this.hasNext())) return null;
-        this.index += 1;
         // b-tree nodes have a kind+num header before their slots, so child pointers
         // are offset by BTREE_NODE_HEADER_SIZE
-        return this.nextInternal(BTREE_NODE_HEADER_SIZE);
+        const nextCursor = this.nextInternal(BTREE_NODE_HEADER_SIZE);
+        this.index += 1;
+        return nextCursor;
+      }
       case Tag.HASH_MAP:
       case Tag.HASH_SET:
       case Tag.COUNTED_HASH_MAP:
@@ -779,9 +783,11 @@ export class CursorIterator {
           this.stack.push(new IteratorLevel(nextPos, CursorIterator.readSlotBlock(this.cursor, nextPos), 0));
           continue;
         } else {
-          this.stack[this.stack.length - 1].index += 1;
+          // level is the top of the stack, so take the position
+          // before advancing its index
+          const position = level.position + level.index * Slot.LENGTH;
+          level.index += 1;
           if (!nextSlot.empty()) {
-            const position = level.position + level.index * Slot.LENGTH;
             return new ReadCursor(new SlotPointer(position, nextSlot), this.cursor.db, this.cursor.frozenAt);
           } else {
             continue;
